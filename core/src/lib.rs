@@ -53,6 +53,7 @@ pub mod muxing;
 pub mod network;
 pub mod transport;
 pub mod upgrade;
+pub mod multihash;
 
 pub use multiaddr::Multiaddr;
 pub use muxing::StreamMuxer;

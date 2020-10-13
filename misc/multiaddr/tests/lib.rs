@@ -1,6 +1,6 @@
 
 use data_encoding::HEXUPPER;
-use multihash::Multihash;
+use multihash::{Multihash, U64};
 use parity_multiaddr::*;
 use quickcheck::{Arbitrary, Gen, QuickCheck};
 use rand::Rng;
@@ -139,8 +139,8 @@ fn ma_valid(source: &str, target: &str, protocols: Vec<Protocol<'_>>) {
     assert_eq!(Multiaddr::try_from(HEXUPPER.decode(target.as_bytes()).unwrap()).unwrap(), parsed);
 }
 
-fn multihash(s: &str) -> Multihash {
-    Multihash::from_bytes(bs58::decode(s).into_vec().unwrap()).unwrap()
+fn multihash(s: &str) -> Multihash<U64> {
+    Multihash::from_bytes(&bs58::decode(s).into_vec().unwrap()).unwrap()
 }
 
 #[test]

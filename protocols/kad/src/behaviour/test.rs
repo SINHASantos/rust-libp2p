@@ -38,7 +38,8 @@ use libp2p_core::{
     identity,
     transport::MemoryTransport,
     multiaddr::{Protocol, Multiaddr, multiaddr},
-    upgrade
+    upgrade,
+    multihash::{Code, Multihash, MultihashDigest},
 };
 use libp2p_noise as noise;
 use libp2p_swarm::Swarm;
@@ -46,7 +47,6 @@ use libp2p_yamux as yamux;
 use quickcheck::*;
 use rand::{Rng, random, thread_rng, rngs::StdRng, SeedableRng};
 use std::{collections::{HashSet, HashMap}, time::Duration, num::NonZeroUsize, u64};
-use multihash::{wrap, Code, Multihash};
 
 type TestSwarm = Swarm<Kademlia<MemoryStore>>;
 
@@ -129,7 +129,7 @@ fn build_fully_connected_nodes_with_config(total: usize, cfg: KademliaConfig)
 }
 
 fn random_multihash() -> Multihash {
-    wrap(Code::Sha2_256, &thread_rng().gen::<[u8; 32]>())
+    Multihash::wrap(Code::Sha2_256.into(), &thread_rng().gen::<[u8; 32]>()).unwrap()
 }
 
 #[derive(Clone, Debug)]
@@ -245,7 +245,7 @@ fn query_iter() {
         match swarms[0].query(&qid) {
             Some(q) => match q.info() {
                 QueryInfo::GetClosestPeers { key } => {
-                    assert_eq!(&key[..], search_target.borrow() as &[u8])
+                    assert_eq!(key, &search_target.to_bytes())
                 },
                 i => panic!("Unexpected query info: {:?}", i)
             }
@@ -268,7 +268,7 @@ fn query_iter() {
                                 id, result: QueryResult::GetClosestPeers(Ok(ok)), ..
                             })) => {
                                 assert_eq!(id, qid);
-                                assert_eq!(&ok.key[..], search_target.as_bytes());
+                                assert_eq!(ok.key, search_target.to_bytes());
                                 assert_eq!(swarm_ids[i], expected_swarm_id);
                                 assert_eq!(swarm.queries.size(), 0);
                                 assert!(expected_peer_ids.iter().all(|p| ok.peers.contains(p)));
@@ -320,7 +320,7 @@ fn unresponsive_not_returned_direct() {
                         Poll::Ready(Some(KademliaEvent::QueryResult {
                             result: QueryResult::GetClosestPeers(Ok(ok)), ..
                         })) => {
-                            assert_eq!(&ok.key[..], search_target.as_bytes());
+                            assert_eq!(ok.key, search_target.to_bytes());
                             assert_eq!(ok.peers.len(), 0);
                             return Poll::Ready(());
                         }
@@ -370,7 +370,7 @@ fn unresponsive_not_returned_indirect() {
                         Poll::Ready(Some(KademliaEvent::QueryResult {
                             result: QueryResult::GetClosestPeers(Ok(ok)), ..
                         })) => {
-                            assert_eq!(&ok.key[..], search_target.as_bytes());
+                            assert_eq!(ok.key, search_target.to_bytes());
                             assert_eq!(ok.peers.len(), 1);
                             assert_eq!(ok.peers[0], first_peer_id);
                             return Poll::Ready(());
@@ -934,7 +934,7 @@ fn disjoint_query_does_not_finish_before_all_paths_did() {
     let mut trudy = build_node(); // Trudy the intrudor, an adversary.
     let mut bob = build_node();
 
-    let key = Key::new(&multihash::Sha2_256::digest(&thread_rng().gen::<[u8; 32]>()));
+    let key = Key::new(&Code::Sha2_256.digest(&thread_rng().gen::<[u8; 32]>()).to_bytes());
     let record_bob = Record::new(key.clone(), b"bob".to_vec());
     let record_trudy = Record::new(key.clone(), b"trudy".to_vec());
 

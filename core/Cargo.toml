@@ -12,7 +12,7 @@ categories = ["network-programming", "asynchronous"]
 [dependencies]
 asn1_der = "0.6.1"
 bs58 = "0.3.0"
-ed25519-dalek = "1.0.1"
+ed25519-dalek = "1.0.0-pre.4"
 either = "1.5"
 fnv = "1.0"
 futures = { version = "0.3.1", features = ["executor", "thread-pool"] }
@@ -21,7 +21,7 @@ lazy_static = "1.2"
 libsecp256k1 = { version = "0.3.1", optional = true }
 log = "0.4"
 multiaddr = { package = "parity-multiaddr", version = "0.9.2", path = "../misc/multiaddr" }
-multihash = "0.11.0"
+multihash = { git = "https://github.com/multiformats/rust-multihash", branch = "libp2p-012", default-features = false, features = ["std", "arb", "derive", "sha2"] }
 multistream-select = { version = "0.8.4", path = "../misc/multistream-select" }
 parking_lot = "0.11.0"
 pin-project = "1.0.0"
