@@ -119,15 +119,6 @@ impl PeerId {
     ///
     /// **NOTE:** This byte representation is not necessarily consistent with
     /// equality of peer IDs. That is, two peer IDs may be considered equal
-    /// while having a different byte representation as per `into_bytes`.
-    pub fn into_bytes(self) -> Vec<u8> {
-        self.multihash.to_bytes()
-    }
-
-    /// Returns a raw bytes representation of this `PeerId`.
-    ///
-    /// **NOTE:** This byte representation is not necessarily consistent with
-    /// equality of peer IDs. That is, two peer IDs may be considered equal
     /// while having a different byte representation as per `to_bytes`.
     pub fn to_bytes(&self) -> Vec<u8> {
        self.multihash.to_bytes()
@@ -195,7 +186,7 @@ impl From<PeerId> for Multihash {
 
 impl From<PeerId> for Vec<u8> {
     fn from(peer_id: PeerId) -> Self {
-        peer_id.into_bytes()
+        peer_id.to_bytes()
     }
 }
 
@@ -237,7 +228,7 @@ mod tests {
     #[test]
     fn peer_id_into_bytes_then_from_bytes() {
         let peer_id = identity::Keypair::generate_ed25519().public().into_peer_id();
-        let second = PeerId::from_bytes(peer_id.clone().into_bytes()).unwrap();
+        let second = PeerId::from_bytes(peer_id.to_bytes()).unwrap();
         assert_eq!(peer_id, second);
     }
 
@@ -252,7 +243,7 @@ mod tests {
     fn random_peer_id_is_valid() {
         for _ in 0 .. 5000 {
             let peer_id = PeerId::random();
-            assert_eq!(peer_id, PeerId::from_bytes(peer_id.clone().into_bytes()).unwrap());
+            assert_eq!(peer_id, PeerId::from_bytes(peer_id.to_bytes()).unwrap());
         }
     }
 }

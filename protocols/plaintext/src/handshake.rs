@@ -53,7 +53,7 @@ pub struct Remote {
 impl HandshakeContext<Local> {
     fn new(config: PlainText2Config) -> Result<Self, PlainTextError> {
         let exchange = Exchange {
-            id: Some(config.local_public_key.clone().into_peer_id().into_bytes()),
+            id: Some(config.local_public_key.clone().into_peer_id().to_bytes()),
             pubkey: Some(config.local_public_key.clone().into_protobuf_encoding())
         };
         let mut buf = Vec::with_capacity(exchange.encoded_len());
