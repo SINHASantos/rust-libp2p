@@ -23,7 +23,7 @@ use crate::multihash::{Multihash, Code, MultihashDigest};
 use bs58;
 use thiserror::Error;
 use rand::Rng;
-use std::{convert::TryFrom, fmt, hash, str::FromStr, cmp};
+use std::{convert::TryFrom, fmt, hash, str::FromStr};
 
 /// Public keys with byte-lengths smaller than `MAX_INLINE_KEY_LENGTH` will be
 /// automatically used as the peer id using an identity multihash.
@@ -33,7 +33,7 @@ const MAX_INLINE_KEY_LENGTH: usize = 42;
 ///
 /// The data is a multihash of the public key of the peer.
 // TODO: maybe keep things in decoded version?
-#[derive(Clone, Eq)]
+#[derive(Clone, Eq, Ord, PartialOrd)]
 pub struct PeerId {
     multihash: Multihash,
 }
@@ -49,20 +49,6 @@ impl fmt::Debug for PeerId {
 impl fmt::Display for PeerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.to_base58().fmt(f)
-    }
-}
-
-impl cmp::PartialOrd for PeerId {
-    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
-        Some(Ord::cmp(self, other))
-    }
-}
-
-impl cmp::Ord for PeerId {
-    fn cmp(&self, other: &Self) -> cmp::Ordering {
-        let lhs = self.to_bytes();
-        let rhs = other.to_bytes();
-        lhs.cmp(&rhs)
     }
 }
 
