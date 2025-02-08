@@ -21,19 +21,24 @@
 //! A benchmark for the `split_send_size` configuration option
 //! using different transports.
 
+use std::{pin::Pin, time::Duration};
+
 use async_std::task;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
-use futures::future::poll_fn;
-use futures::prelude::*;
-use futures::{channel::oneshot, future::join};
-use libp2p_core::muxing::StreamMuxerExt;
-use libp2p_core::{
-    identity, multiaddr::multiaddr, muxing, transport, upgrade, Multiaddr, PeerId, Transport,
+use futures::{
+    channel::oneshot,
+    future::{join, poll_fn},
+    prelude::*,
 };
+use libp2p_core::{
+    multiaddr::multiaddr, muxing, muxing::StreamMuxerExt, transport, transport::ListenerId,
+    upgrade, Endpoint, Multiaddr, Transport,
+};
+use libp2p_identity as identity;
+use libp2p_identity::PeerId;
 use libp2p_mplex as mplex;
-use libp2p_plaintext::PlainText2Config;
-use std::pin::Pin;
-use std::time::Duration;
+use libp2p_plaintext as plaintext;
+use tracing_subscriber::EnvFilter;
 
 type BenchTransport = transport::Boxed<(PeerId, muxing::StreamMuxerBox)>;
 
@@ -50,7 +55,9 @@ const BENCH_SIZES: [usize; 8] = [
 ];
 
 fn prepare(c: &mut Criterion) {
-    let _ = env_logger::try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
 
     let payload: Vec<u8> = vec![1; 1024 * 1024];
 
@@ -97,10 +104,12 @@ fn prepare(c: &mut Criterion) {
 fn run(
     receiver_trans: &mut BenchTransport,
     sender_trans: &mut BenchTransport,
-    payload: &Vec<u8>,
+    payload: &[u8],
     listen_addr: &Multiaddr,
 ) {
-    receiver_trans.listen_on(listen_addr.clone()).unwrap();
+    receiver_trans
+        .listen_on(ListenerId::next(), listen_addr.clone())
+        .unwrap();
     let (addr_sender, addr_receiver) = oneshot::channel();
     let mut addr_sender = Some(addr_sender);
     let payload_len = payload.len();
@@ -113,7 +122,8 @@ fn run(
                 }
                 transport::TransportEvent::Incoming { upgrade, .. } => {
                     let (_peer, mut conn) = upgrade.await.unwrap();
-                    // Just calling `poll_inbound` without `poll` is fine here because mplex makes progress through all `poll_` functions. It is hacky though.
+                    // Just calling `poll_inbound` without `poll` is fine here because mplex makes
+                    // progress through all `poll_` functions. It is hacky though.
                     let mut s = poll_fn(|cx| conn.poll_inbound_unpin(cx))
                         .await
                         .expect("unexpected error");
@@ -140,8 +150,19 @@ fn run(
     // Spawn and block on the sender, i.e. until all data is sent.
     let sender = async move {
         let addr = addr_receiver.await.unwrap();
-        let (_peer, mut conn) = sender_trans.dial(addr).unwrap().await.unwrap();
-        // Just calling `poll_outbound` without `poll` is fine here because mplex makes progress through all `poll_` functions. It is hacky though.
+        let (_peer, mut conn) = sender_trans
+            .dial(
+                addr,
+                transport::DialOpts {
+                    role: Endpoint::Dialer,
+                    port_use: transport::PortUse::Reuse,
+                },
+            )
+            .unwrap()
+            .await
+            .unwrap();
+        // Just calling `poll_outbound` without `poll` is fine here because mplex makes progress
+        // through all `poll_` functions. It is hacky though.
         let mut stream = poll_fn(|cx| conn.poll_outbound_unpin(cx)).await.unwrap();
         let mut off = 0;
         loop {
@@ -163,30 +184,28 @@ fn run(
 }
 
 fn tcp_transport(split_send_size: usize) -> BenchTransport {
-    let key = identity::Keypair::generate_ed25519();
-    let local_public_key = key.public();
-
     let mut mplex = mplex::MplexConfig::default();
     mplex.set_split_send_size(split_send_size);
 
     libp2p_tcp::async_io::Transport::new(libp2p_tcp::Config::default().nodelay(true))
         .upgrade(upgrade::Version::V1)
-        .authenticate(PlainText2Config { local_public_key })
+        .authenticate(plaintext::Config::new(
+            &identity::Keypair::generate_ed25519(),
+        ))
         .multiplex(mplex)
         .timeout(Duration::from_secs(5))
         .boxed()
 }
 
 fn mem_transport(split_send_size: usize) -> BenchTransport {
-    let key = identity::Keypair::generate_ed25519();
-    let local_public_key = key.public();
-
     let mut mplex = mplex::MplexConfig::default();
     mplex.set_split_send_size(split_send_size);
 
     transport::MemoryTransport::default()
         .upgrade(upgrade::Version::V1)
-        .authenticate(PlainText2Config { local_public_key })
+        .authenticate(plaintext::Config::new(
+            &identity::Keypair::generate_ed25519(),
+        ))
         .multiplex(mplex)
         .timeout(Duration::from_secs(5))
         .boxed()

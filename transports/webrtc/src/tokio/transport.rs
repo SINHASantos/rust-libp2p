@@ -18,23 +18,22 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use futures::{future::BoxFuture, prelude::*, stream::SelectAll, stream::Stream};
-use if_watch::{tokio::IfWatcher, IfEvent};
-use libp2p_core::{
-    identity,
-    multiaddr::{Multiaddr, Protocol},
-    transport::{ListenerId, TransportError, TransportEvent},
-    PeerId,
-};
-use webrtc::peer_connection::configuration::RTCConfiguration;
-
-use std::net::IpAddr;
 use std::{
     io,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     pin::Pin,
     task::{Context, Poll, Waker},
 };
+
+use futures::{future::BoxFuture, prelude::*, stream::SelectAll};
+use if_watch::{tokio::IfWatcher, IfEvent};
+use libp2p_core::{
+    multiaddr::{Multiaddr, Protocol},
+    transport::{DialOpts, ListenerId, TransportError, TransportEvent},
+};
+use libp2p_identity as identity;
+use libp2p_identity::PeerId;
+use webrtc::peer_connection::configuration::RTCConfiguration;
 
 use crate::tokio::{
     certificate::Certificate,
@@ -59,9 +58,9 @@ impl Transport {
     /// # Example
     ///
     /// ```
-    /// use libp2p_core::identity;
+    /// use libp2p_identity as identity;
+    /// use libp2p_webrtc::tokio::{Certificate, Transport};
     /// use rand::thread_rng;
-    /// use libp2p_webrtc::tokio::{Transport, Certificate};
     ///
     /// let id_keys = identity::Keypair::generate_ed25519();
     /// let transport = Transport::new(id_keys, Certificate::generate(&mut thread_rng()).unwrap());
@@ -80,9 +79,11 @@ impl libp2p_core::Transport for Transport {
     type ListenerUpgrade = BoxFuture<'static, Result<Self::Output, Self::Error>>;
     type Dial = BoxFuture<'static, Result<Self::Output, Self::Error>>;
 
-    fn listen_on(&mut self, addr: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
-        let id = ListenerId::new();
-
+    fn listen_on(
+        &mut self,
+        id: ListenerId,
+        addr: Multiaddr,
+    ) -> Result<(), TransportError<Self::Error>> {
         let socket_addr =
             parse_webrtc_listen_addr(&addr).ok_or(TransportError::MultiaddrNotSupported(addr))?;
         let udp_mux = UDPMuxNewAddr::listen_on(socket_addr)
@@ -93,7 +94,7 @@ impl libp2p_core::Transport for Transport {
                 .map_err(|e| TransportError::Other(Error::Io(e)))?,
         );
 
-        Ok(id)
+        Ok(())
     }
 
     fn remove_listener(&mut self, id: ListenerId) -> bool {
@@ -116,8 +117,20 @@ impl libp2p_core::Transport for Transport {
         }
     }
 
-    fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
-        let (sock_addr, server_fingerprint) = parse_webrtc_dial_addr(&addr)
+    fn dial(
+        &mut self,
+        addr: Multiaddr,
+        dial_opts: DialOpts,
+    ) -> Result<Self::Dial, TransportError<Self::Error>> {
+        if dial_opts.role.is_listener() {
+            // TODO: As the listener of a WebRTC hole punch, we need to send a random UDP packet to
+            // the `addr`. See DCUtR specification below.
+            //
+            // https://github.com/libp2p/specs/blob/master/relay/DCUtR.md#the-protocol
+            tracing::warn!("WebRTC hole punch is not yet supported");
+        }
+
+        let (sock_addr, server_fingerprint) = libp2p_webrtc_utils::parse_webrtc_dial_addr(&addr)
             .ok_or_else(|| TransportError::MultiaddrNotSupported(addr.clone()))?;
         if sock_addr.port() == 0 || sock_addr.ip().is_unspecified() {
             return Err(TransportError::MultiaddrNotSupported(addr));
@@ -138,7 +151,7 @@ impl libp2p_core::Transport for Transport {
                 sock_addr,
                 config.inner,
                 udp_mux,
-                client_fingerprint,
+                client_fingerprint.into_inner(),
                 server_fingerprint,
                 config.id_keys,
             )
@@ -147,21 +160,6 @@ impl libp2p_core::Transport for Transport {
             Ok((peer_id, connection))
         }
         .boxed())
-    }
-
-    fn dial_as_listener(
-        &mut self,
-        addr: Multiaddr,
-    ) -> Result<Self::Dial, TransportError<Self::Error>> {
-        // TODO: As the listener of a WebRTC hole punch, we need to send a random UDP packet to the
-        // `addr`. See DCUtR specification below.
-        //
-        // https://github.com/libp2p/specs/blob/master/relay/DCUtR.md#the-protocol
-        self.dial(addr)
-    }
-
-    fn address_translation(&self, server: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
-        libp2p_core::address_translation(server, observed)
     }
 }
 
@@ -236,7 +234,7 @@ impl ListenStream {
     /// terminate the stream.
     fn close(&mut self, reason: Result<(), Error>) {
         match self.report_closed {
-            Some(_) => log::debug!("Listener was already closed."),
+            Some(_) => tracing::debug!("Listener was already closed"),
             None => {
                 // Report the listener event as closed.
                 let _ = self
@@ -255,9 +253,8 @@ impl ListenStream {
     }
 
     fn poll_if_watcher(&mut self, cx: &mut Context<'_>) -> Poll<<Self as Stream>::Item> {
-        let if_watcher = match self.if_watcher.as_mut() {
-            Some(w) => w,
-            None => return Poll::Pending,
+        let Some(if_watcher) = self.if_watcher.as_mut() else {
+            return Poll::Pending;
         };
 
         while let Poll::Ready(event) = if_watcher.poll_if_event(cx) {
@@ -335,7 +332,7 @@ impl Stream for ListenStream {
                         new_addr.addr,
                         self.config.inner.clone(),
                         self.udp_mux.udp_mux_handle(),
-                        self.config.fingerprint,
+                        self.config.fingerprint.into_inner(),
                         new_addr.ufrag,
                         self.config.id_keys.clone(),
                     )
@@ -391,7 +388,7 @@ fn socketaddr_to_multiaddr(socket_addr: &SocketAddr, certhash: Option<Fingerprin
     let addr = Multiaddr::empty()
         .with(socket_addr.ip().into())
         .with(Protocol::Udp(socket_addr.port()))
-        .with(Protocol::WebRTC);
+        .with(Protocol::WebRTCDirect);
 
     if let Some(fp) = certhash {
         return addr.with(Protocol::Certhash(fp.to_multihash()));
@@ -410,12 +407,11 @@ fn parse_webrtc_listen_addr(addr: &Multiaddr) -> Option<SocketAddr> {
         _ => return None,
     };
 
-    let port = iter.next()?;
-    let webrtc = iter.next()?;
-
-    let port = match (port, webrtc) {
-        (Protocol::Udp(port), Protocol::WebRTC) => port,
-        _ => return None,
+    let Protocol::Udp(port) = iter.next()? else {
+        return None;
+    };
+    let Protocol::WebRTCDirect = iter.next()? else {
+        return None;
     };
 
     if iter.next().is_some() {
@@ -425,49 +421,17 @@ fn parse_webrtc_listen_addr(addr: &Multiaddr) -> Option<SocketAddr> {
     Some(SocketAddr::new(ip, port))
 }
 
-/// Parse the given [`Multiaddr`] into a [`SocketAddr`] and a [`Fingerprint`] for dialing.
-fn parse_webrtc_dial_addr(addr: &Multiaddr) -> Option<(SocketAddr, Fingerprint)> {
-    let mut iter = addr.iter();
-
-    let ip = match iter.next()? {
-        Protocol::Ip4(ip) => IpAddr::from(ip),
-        Protocol::Ip6(ip) => IpAddr::from(ip),
-        _ => return None,
-    };
-
-    let port = iter.next()?;
-    let webrtc = iter.next()?;
-    let certhash = iter.next()?;
-
-    let (port, fingerprint) = match (port, webrtc, certhash) {
-        (Protocol::Udp(port), Protocol::WebRTC, Protocol::Certhash(cert_hash)) => {
-            let fingerprint = Fingerprint::try_from_multihash(cert_hash)?;
-
-            (port, fingerprint)
-        }
-        _ => return None,
-    };
-
-    match iter.next() {
-        Some(Protocol::P2p(_)) => {}
-        // peer ID is optional
-        None => {}
-        // unexpected protocol
-        Some(_) => return None,
-    }
-
-    Some((SocketAddr::new(ip, port), fingerprint))
-}
-
 // Tests //////////////////////////////////////////////////////////////////////////////////////////
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::net::Ipv6Addr;
+
     use futures::future::poll_fn;
-    use libp2p_core::{multiaddr::Protocol, Transport as _};
+    use libp2p_core::Transport as _;
     use rand::thread_rng;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    use super::*;
 
     #[test]
     fn missing_webrtc_protocol() {
@@ -479,46 +443,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_valid_address_with_certhash_and_p2p() {
-        let addr = "/ip4/127.0.0.1/udp/39901/webrtc/certhash/uEiDikp5KVUgkLta1EjUN-IKbHk-dUBg8VzKgf5nXxLK46w/p2p/12D3KooWNpDk9w6WrEEcdsEH1y47W71S36yFjw4sd3j7omzgCSMS"
-            .parse()
-            .unwrap();
-
-        let maybe_parsed = parse_webrtc_dial_addr(&addr);
-
-        assert_eq!(
-            maybe_parsed,
-            Some((
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 39901),
-                Fingerprint::raw(hex_literal::hex!(
-                    "e2929e4a5548242ed6b512350df8829b1e4f9d50183c5732a07f99d7c4b2b8eb"
-                ))
-            ))
-        );
-    }
-
-    #[test]
-    fn peer_id_is_not_required() {
-        let addr = "/ip4/127.0.0.1/udp/39901/webrtc/certhash/uEiDikp5KVUgkLta1EjUN-IKbHk-dUBg8VzKgf5nXxLK46w"
-            .parse()
-            .unwrap();
-
-        let maybe_parsed = parse_webrtc_dial_addr(&addr);
-
-        assert_eq!(
-            maybe_parsed,
-            Some((
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 39901),
-                Fingerprint::raw(hex_literal::hex!(
-                    "e2929e4a5548242ed6b512350df8829b1e4f9d50183c5732a07f99d7c4b2b8eb"
-                ))
-            ))
-        );
-    }
-
-    #[test]
     fn tcp_is_invalid_protocol() {
-        let addr = "/ip4/127.0.0.1/tcp/12345/webrtc/certhash/uEiDikp5KVUgkLta1EjUN-IKbHk-dUBg8VzKgf5nXxLK46w"
+        let addr = "/ip4/127.0.0.1/tcp/12345/webrtc-direct/certhash/uEiDikp5KVUgkLta1EjUN-IKbHk-dUBg8VzKgf5nXxLK46w"
             .parse()
             .unwrap();
 
@@ -529,7 +455,7 @@ mod tests {
 
     #[test]
     fn cannot_follow_other_protocols_after_certhash() {
-        let addr = "/ip4/127.0.0.1/udp/12345/webrtc/certhash/uEiDikp5KVUgkLta1EjUN-IKbHk-dUBg8VzKgf5nXxLK46w/tcp/12345"
+        let addr = "/ip4/127.0.0.1/udp/12345/webrtc-direct/certhash/uEiDikp5KVUgkLta1EjUN-IKbHk-dUBg8VzKgf5nXxLK46w/tcp/12345"
             .parse()
             .unwrap();
 
@@ -539,28 +465,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_ipv6() {
-        let addr =
-            "/ip6/::1/udp/12345/webrtc/certhash/uEiDikp5KVUgkLta1EjUN-IKbHk-dUBg8VzKgf5nXxLK46w/p2p/12D3KooWNpDk9w6WrEEcdsEH1y47W71S36yFjw4sd3j7omzgCSMS"
-                .parse()
-                .unwrap();
-
-        let maybe_parsed = parse_webrtc_dial_addr(&addr);
-
-        assert_eq!(
-            maybe_parsed,
-            Some((
-                SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 12345),
-                Fingerprint::raw(hex_literal::hex!(
-                    "e2929e4a5548242ed6b512350df8829b1e4f9d50183c5732a07f99d7c4b2b8eb"
-                ))
-            ))
-        );
-    }
-
-    #[test]
     fn can_parse_valid_addr_without_certhash() {
-        let addr = "/ip6/::1/udp/12345/webrtc".parse().unwrap();
+        let addr = "/ip6/::1/udp/12345/webrtc-direct".parse().unwrap();
 
         let maybe_parsed = parse_webrtc_listen_addr(&addr);
 
@@ -574,7 +480,7 @@ mod tests {
     fn fails_to_parse_if_certhash_present_but_wrong_hash_function() {
         // We only support SHA2-256 for now but this certhash has been encoded with SHA3-256.
         let addr =
-            "/ip6/::1/udp/12345/webrtc/certhash/uFiCH_tkkzpAwkoIDbE4I7QtQksFMYs5nQ4MyYrkgCJYi4A"
+            "/ip6/::1/udp/12345/webrtc-direct/certhash/uFiCH_tkkzpAwkoIDbE4I7QtQksFMYs5nQ4MyYrkgCJYi4A"
                 .parse()
                 .unwrap();
 
@@ -596,8 +502,12 @@ mod tests {
         // Run test twice to check that there is no unexpected behaviour if `QuicTransport.listener`
         // is temporarily empty.
         for _ in 0..2 {
-            let listener = transport
-                .listen_on("/ip4/0.0.0.0/udp/0/webrtc".parse().unwrap())
+            let listener = ListenerId::next();
+            transport
+                .listen_on(
+                    listener,
+                    "/ip4/0.0.0.0/udp/0/webrtc-direct".parse().unwrap(),
+                )
                 .unwrap();
             match poll_fn(|cx| Pin::new(&mut transport).as_mut().poll(cx)).await {
                 TransportEvent::NewAddress {
@@ -611,7 +521,10 @@ mod tests {
                     assert!(
                         matches!(listen_addr.iter().nth(1), Some(Protocol::Udp(port)) if port != 0)
                     );
-                    assert!(matches!(listen_addr.iter().nth(2), Some(Protocol::WebRTC)));
+                    assert!(matches!(
+                        listen_addr.iter().nth(2),
+                        Some(Protocol::WebRTCDirect)
+                    ));
                 }
                 e => panic!("Unexpected event: {e:?}"),
             }

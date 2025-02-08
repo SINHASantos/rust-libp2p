@@ -18,41 +18,40 @@
 // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
-use crate::connection::{Connection, ConnectionId, PendingPoint};
-#[allow(deprecated)]
-use crate::IntoConnectionHandler;
+use std::{
+    collections::HashMap,
+    convert::Infallible,
+    fmt,
+    num::{NonZeroU8, NonZeroUsize},
+    pin::Pin,
+    task::{Context, Poll, Waker},
+};
+
+use concurrent_dial::ConcurrentDial;
+use fnv::FnvHashMap;
+use futures::{
+    channel::{mpsc, oneshot},
+    future::{poll_fn, BoxFuture, Either},
+    prelude::*,
+    ready,
+    stream::{FuturesUnordered, SelectAll},
+};
+use libp2p_core::{
+    connection::Endpoint,
+    muxing::{StreamMuxerBox, StreamMuxerExt},
+    transport::PortUse,
+};
+use tracing::Instrument;
+use web_time::{Duration, Instant};
+
 use crate::{
     connection::{
-        Connected, ConnectionError, ConnectionLimit, IncomingInfo, PendingConnectionError,
-        PendingInboundConnectionError, PendingOutboundConnectionError,
+        Connected, Connection, ConnectionError, ConnectionId, IncomingInfo, PendingConnectionError,
+        PendingInboundConnectionError, PendingOutboundConnectionError, PendingPoint,
     },
     transport::TransportError,
     ConnectedPoint, ConnectionHandler, Executor, Multiaddr, PeerId,
 };
-use concurrent_dial::ConcurrentDial;
-use fnv::FnvHashMap;
-use futures::prelude::*;
-use futures::stream::SelectAll;
-use futures::{
-    channel::{mpsc, oneshot},
-    future::{poll_fn, BoxFuture, Either},
-    ready,
-    stream::FuturesUnordered,
-};
-use instant::Instant;
-use libp2p_core::connection::Endpoint;
-use libp2p_core::muxing::{StreamMuxerBox, StreamMuxerExt};
-use std::task::Waker;
-use std::{
-    collections::{hash_map, HashMap},
-    convert::TryFrom as _,
-    fmt,
-    num::{NonZeroU8, NonZeroUsize},
-    pin::Pin,
-    task::Context,
-    task::Poll,
-};
-use void::Void;
 
 mod concurrent_dial;
 mod task;
@@ -72,6 +71,7 @@ impl ExecSwitch {
         }
     }
 
+    #[track_caller]
     fn spawn(&mut self, task: impl Future<Output = ()> + Send + 'static) {
         let task = task.boxed();
 
@@ -83,7 +83,7 @@ impl ExecSwitch {
 }
 
 /// A connection `Pool` manages a set of connections for each peer.
-pub struct Pool<THandler>
+pub(crate) struct Pool<THandler>
 where
     THandler: ConnectionHandler,
 {
@@ -93,8 +93,10 @@ where
     counters: ConnectionCounters,
 
     /// The managed connections of each peer that are currently considered established.
-    established:
-        FnvHashMap<PeerId, FnvHashMap<ConnectionId, EstablishedConnection<THandler::InEvent>>>,
+    established: FnvHashMap<
+        PeerId,
+        FnvHashMap<ConnectionId, EstablishedConnection<THandler::FromBehaviour>>,
+    >,
 
     /// The pending connections that are currently being negotiated.
     pending: HashMap<ConnectionId, PendingConnection>,
@@ -113,7 +115,8 @@ where
     /// See [`Connection::max_negotiating_inbound_streams`].
     max_negotiating_inbound_streams: usize,
 
-    /// How many [`task::EstablishedConnectionEvent`]s can be buffered before the connection is back-pressured.
+    /// How many [`task::EstablishedConnectionEvent`]s can be buffered before the connection is
+    /// back-pressured.
     per_connection_event_buffer_size: usize,
 
     /// The executor to use for running connection tasks. Can either be a global executor
@@ -132,14 +135,17 @@ where
 
     /// Receivers for events reported from established connections.
     established_connection_events:
-        SelectAll<mpsc::Receiver<task::EstablishedConnectionEvent<THandler>>>,
+        SelectAll<mpsc::Receiver<task::EstablishedConnectionEvent<THandler::ToBehaviour>>>,
 
     /// Receivers for [`NewConnection`] objects that are dropped.
     new_connection_dropped_listeners: FuturesUnordered<oneshot::Receiver<StreamMuxerBox>>,
+
+    /// How long a connection should be kept alive once it starts idling.
+    idle_connection_timeout: Duration,
 }
 
 #[derive(Debug)]
-pub struct EstablishedConnection<TInEvent> {
+pub(crate) struct EstablishedConnection<TInEvent> {
     endpoint: ConnectedPoint,
     /// Channel endpoint to send commands to the task.
     sender: mpsc::Sender<task::Command<TInEvent>>,
@@ -156,7 +162,7 @@ impl<TInEvent> EstablishedConnection<TInEvent> {
     /// `poll_ready_notify_handler` without another intervening execution
     /// of `notify_handler`, it only fails if the connection is now about
     /// to close.
-    pub fn notify_handler(&mut self, event: TInEvent) -> Result<(), TInEvent> {
+    pub(crate) fn notify_handler(&mut self, event: TInEvent) -> Result<(), TInEvent> {
         let cmd = task::Command::NotifyHandler(event);
         self.sender.try_send(cmd).map_err(|e| match e.into_inner() {
             task::Command::NotifyHandler(event) => event,
@@ -170,14 +176,17 @@ impl<TInEvent> EstablishedConnection<TInEvent> {
     ///
     /// Returns `Err(())` if the background task associated with the connection
     /// is terminating and the connection is about to close.
-    pub fn poll_ready_notify_handler(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), ()>> {
+    pub(crate) fn poll_ready_notify_handler(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), ()>> {
         self.sender.poll_ready(cx).map_err(|_| ())
     }
 
     /// Initiates a graceful close of the connection.
     ///
     /// Has no effect if the connection is already closing.
-    pub fn start_close(&mut self) {
+    pub(crate) fn start_close(&mut self) {
         // Clone the sender so that we are guaranteed to have
         // capacity for the close command (every sender gets a slot).
         match self.sender.clone().try_send(task::Command::Close) {
@@ -192,14 +201,14 @@ struct PendingConnection {
     peer_id: Option<PeerId>,
     endpoint: PendingPoint,
     /// When dropped, notifies the task which then knows to terminate.
-    abort_notifier: Option<oneshot::Sender<Void>>,
+    abort_notifier: Option<oneshot::Sender<Infallible>>,
     /// The moment we became aware of this possible connection, useful for timing metrics.
     accepted_at: Instant,
 }
 
 impl PendingConnection {
     fn is_for_same_remote_as(&self, other: PeerId) -> bool {
-        self.peer_id.map_or(false, |peer| peer == other)
+        self.peer_id == Some(other)
     }
 
     /// Aborts the connection attempt, closing the connection.
@@ -220,7 +229,7 @@ impl<THandler: ConnectionHandler> fmt::Debug for Pool<THandler> {
 
 /// Event that can happen on the `Pool`.
 #[derive(Debug)]
-pub enum PoolEvent<THandler: ConnectionHandler> {
+pub(crate) enum PoolEvent<ToBehaviour> {
     /// A new connection has been established.
     ConnectionEstablished {
         id: ConnectionId,
@@ -239,23 +248,20 @@ pub enum PoolEvent<THandler: ConnectionHandler> {
     ///
     /// A connection may close if
     ///
-    ///   * it encounters an error, which includes the connection being
-    ///     closed by the remote. In this case `error` is `Some`.
-    ///   * it was actively closed by [`EstablishedConnection::start_close`],
-    ///     i.e. a successful, orderly close.
-    ///   * it was actively closed by [`Pool::disconnect`], i.e.
-    ///     dropped without an orderly close.
-    ///
+    ///   * it encounters an error, which includes the connection being closed by the remote. In
+    ///     this case `error` is `Some`.
+    ///   * it was actively closed by [`EstablishedConnection::start_close`], i.e. a successful,
+    ///     orderly close.
+    ///   * it was actively closed by [`Pool::disconnect`], i.e. dropped without an orderly close.
     ConnectionClosed {
         id: ConnectionId,
         /// Information about the connection that errored.
         connected: Connected,
         /// The error that occurred, if any. If `None`, the connection
         /// was closed by the local peer.
-        error: Option<ConnectionError<THandler::Error>>,
+        error: Option<ConnectionError>,
         /// The remaining established connections to the same peer.
         remaining_established_connection_ids: Vec<ConnectionId>,
-        handler: THandler,
     },
 
     /// An outbound connection attempt failed.
@@ -285,7 +291,7 @@ pub enum PoolEvent<THandler: ConnectionHandler> {
         id: ConnectionId,
         peer_id: PeerId,
         /// The produced event.
-        event: THandler::OutEvent,
+        event: ToBehaviour,
     },
 
     /// The connection to a node has changed its address.
@@ -304,7 +310,7 @@ where
     THandler: ConnectionHandler,
 {
     /// Creates a new empty `Pool`.
-    pub fn new(local_id: PeerId, config: PoolConfig, limits: ConnectionLimits) -> Self {
+    pub(crate) fn new(local_id: PeerId, config: PoolConfig) -> Self {
         let (pending_connection_events_tx, pending_connection_events_rx) = mpsc::channel(0);
         let executor = match config.executor {
             Some(exec) => ExecSwitch::Executor(exec),
@@ -312,7 +318,7 @@ where
         };
         Pool {
             local_id,
-            counters: ConnectionCounters::new(limits),
+            counters: ConnectionCounters::new(),
             established: Default::default(),
             pending: Default::default(),
             task_command_buffer_size: config.task_command_buffer_size,
@@ -320,6 +326,7 @@ where
             substream_upgrade_protocol_override: config.substream_upgrade_protocol_override,
             max_negotiating_inbound_streams: config.max_negotiating_inbound_streams,
             per_connection_event_buffer_size: config.per_connection_event_buffer_size,
+            idle_connection_timeout: config.idle_connection_timeout,
             executor,
             pending_connection_events_tx,
             pending_connection_events_rx,
@@ -330,15 +337,15 @@ where
     }
 
     /// Gets the dedicated connection counters.
-    pub fn counters(&self) -> &ConnectionCounters {
+    pub(crate) fn counters(&self) -> &ConnectionCounters {
         &self.counters
     }
 
     /// Gets an established connection from the pool by ID.
-    pub fn get_established(
+    pub(crate) fn get_established(
         &mut self,
         id: ConnectionId,
-    ) -> Option<&mut EstablishedConnection<THandler::InEvent>> {
+    ) -> Option<&mut EstablishedConnection<THandler::FromBehaviour>> {
         self.established
             .values_mut()
             .find_map(|connections| connections.get_mut(&id))
@@ -347,13 +354,13 @@ where
     /// Returns true if we are connected to the given peer.
     ///
     /// This will return true only after a `NodeReached` event has been produced by `poll()`.
-    pub fn is_connected(&self, id: PeerId) -> bool {
+    pub(crate) fn is_connected(&self, id: PeerId) -> bool {
         self.established.contains_key(&id)
     }
 
     /// Returns the number of connected peers, i.e. those with at least one
     /// established connection in the pool.
-    pub fn num_peers(&self) -> usize {
+    pub(crate) fn num_peers(&self) -> usize {
         self.established.len()
     }
 
@@ -362,7 +369,7 @@ where
     /// All connections to the peer, whether pending or established are
     /// closed asap and no more events from these connections are emitted
     /// by the pool effective immediately.
-    pub fn disconnect(&mut self, peer: PeerId) {
+    pub(crate) fn disconnect(&mut self, peer: PeerId) {
         if let Some(conns) = self.established.get_mut(&peer) {
             for (_, conn) in conns.iter_mut() {
                 conn.start_close();
@@ -379,7 +386,7 @@ where
     }
 
     /// Returns an iterator over all established connections of `peer`.
-    pub fn iter_established_connections_of_peer(
+    pub(crate) fn iter_established_connections_of_peer(
         &mut self,
         peer: &PeerId,
     ) -> impl Iterator<Item = ConnectionId> + '_ {
@@ -390,7 +397,7 @@ where
     }
 
     /// Checks whether we are currently dialing the given peer.
-    pub fn is_dialing(&self, peer: PeerId) -> bool {
+    pub(crate) fn is_dialing(&self, peer: PeerId) -> bool {
         self.pending.iter().any(|(_, info)| {
             matches!(info.endpoint, PendingPoint::Dialer { .. }) && info.is_for_same_remote_as(peer)
         })
@@ -398,16 +405,13 @@ where
 
     /// Returns an iterator over all connected peers, i.e. those that have
     /// at least one established connection in the pool.
-    pub fn iter_connected(&self) -> impl Iterator<Item = &PeerId> {
+    pub(crate) fn iter_connected(&self) -> impl Iterator<Item = &PeerId> {
         self.established.keys()
     }
 
     /// Adds a pending outgoing connection to the pool in the form of a `Future`
     /// that establishes and negotiates the connection.
-    ///
-    /// Returns an error if the limit of pending outgoing connections
-    /// has been reached.
-    pub fn add_outgoing(
+    pub(crate) fn add_outgoing(
         &mut self,
         dials: Vec<
             BoxFuture<
@@ -420,27 +424,31 @@ where
         >,
         peer: Option<PeerId>,
         role_override: Endpoint,
+        port_use: PortUse,
         dial_concurrency_factor_override: Option<NonZeroU8>,
         connection_id: ConnectionId,
-    ) -> Result<(), ConnectionLimit> {
-        self.counters.check_max_pending_outgoing()?;
-
-        let dial = ConcurrentDial::new(
-            dials,
-            dial_concurrency_factor_override.unwrap_or(self.dial_concurrency_factor),
-        );
+    ) {
+        let concurrency_factor =
+            dial_concurrency_factor_override.unwrap_or(self.dial_concurrency_factor);
+        let span = tracing::debug_span!(parent: tracing::Span::none(), "new_outgoing_connection", %concurrency_factor, num_dials=%dials.len(), id = %connection_id);
+        span.follows_from(tracing::Span::current());
 
         let (abort_notifier, abort_receiver) = oneshot::channel();
 
-        self.executor
-            .spawn(task::new_for_pending_outgoing_connection(
+        self.executor.spawn(
+            task::new_for_pending_outgoing_connection(
                 connection_id,
-                dial,
+                ConcurrentDial::new(dials, concurrency_factor),
                 abort_receiver,
                 self.pending_connection_events_tx.clone(),
-            ));
+            )
+            .instrument(span),
+        );
 
-        let endpoint = PendingPoint::Dialer { role_override };
+        let endpoint = PendingPoint::Dialer {
+            role_override,
+            port_use,
+        };
 
         self.counters.inc_pending(&endpoint);
         self.pending.insert(
@@ -452,37 +460,34 @@ where
                 accepted_at: Instant::now(),
             },
         );
-
-        Ok(())
     }
 
     /// Adds a pending incoming connection to the pool in the form of a
     /// `Future` that establishes and negotiates the connection.
-    ///
-    /// Returns an error if the limit of pending incoming connections
-    /// has been reached.
-    pub fn add_incoming<TFut>(
+    pub(crate) fn add_incoming<TFut>(
         &mut self,
         future: TFut,
         info: IncomingInfo<'_>,
         connection_id: ConnectionId,
-    ) -> Result<(), ConnectionLimit>
-    where
+    ) where
         TFut: Future<Output = Result<(PeerId, StreamMuxerBox), std::io::Error>> + Send + 'static,
     {
         let endpoint = info.create_connected_point();
 
-        self.counters.check_max_pending_incoming()?;
-
         let (abort_notifier, abort_receiver) = oneshot::channel();
 
-        self.executor
-            .spawn(task::new_for_pending_incoming_connection(
+        let span = tracing::debug_span!(parent: tracing::Span::none(), "new_incoming_connection", remote_addr = %info.send_back_addr, id = %connection_id);
+        span.follows_from(tracing::Span::current());
+
+        self.executor.spawn(
+            task::new_for_pending_incoming_connection(
                 connection_id,
                 future,
                 abort_receiver,
                 self.pending_connection_events_tx.clone(),
-            ));
+            )
+            .instrument(span),
+        );
 
         self.counters.inc_pending_incoming();
         self.pending.insert(
@@ -494,21 +499,17 @@ where
                 accepted_at: Instant::now(),
             },
         );
-
-        Ok(())
     }
 
-    #[allow(deprecated)]
-    pub fn spawn_connection(
+    pub(crate) fn spawn_connection(
         &mut self,
         id: ConnectionId,
         obtained_peer_id: PeerId,
         endpoint: &ConnectedPoint,
         connection: NewConnection,
-        handler: <THandler as IntoConnectionHandler>::Handler,
+        handler: THandler,
     ) {
         let connection = connection.extract();
-
         let conns = self.established.entry(obtained_peer_id).or_default();
         self.counters.inc_established(endpoint);
 
@@ -532,19 +533,28 @@ where
             handler,
             self.substream_upgrade_protocol_override,
             self.max_negotiating_inbound_streams,
+            self.idle_connection_timeout,
         );
 
-        self.executor.spawn(task::new_for_established_connection(
-            id,
-            obtained_peer_id,
-            connection,
-            command_receiver,
-            event_sender,
-        ))
+        let span = tracing::debug_span!(parent: tracing::Span::none(), "new_established_connection", remote_addr = %endpoint.get_remote_address(), %id, peer = %obtained_peer_id);
+        span.follows_from(tracing::Span::current());
+
+        self.executor.spawn(
+            task::new_for_established_connection(
+                id,
+                obtained_peer_id,
+                connection,
+                command_receiver,
+                event_sender,
+            )
+            .instrument(span),
+        )
     }
 
     /// Polls the connection pool for events.
-    pub fn poll(&mut self, cx: &mut Context<'_>) -> Poll<PoolEvent<THandler>>
+    #[tracing::instrument(level = "debug", name = "Pool::poll", skip(self, cx))]
+    #[expect(deprecated)] // TODO: Remove when {In, Out}boundOpenInfo is fully removed.
+    pub(crate) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<PoolEvent<THandler::ToBehaviour>>
     where
         THandler: ConnectionHandler + 'static,
         <THandler as ConnectionHandler>::OutboundOpenInfo: Send,
@@ -585,12 +595,7 @@ where
                     old_endpoint,
                 });
             }
-            Poll::Ready(Some(task::EstablishedConnectionEvent::Closed {
-                id,
-                peer_id,
-                error,
-                handler,
-            })) => {
+            Poll::Ready(Some(task::EstablishedConnectionEvent::Closed { id, peer_id, error })) => {
                 let connections = self
                     .established
                     .get_mut(&peer_id)
@@ -608,7 +613,6 @@ where
                     connected: Connected { endpoint, peer_id },
                     error,
                     remaining_established_connection_ids,
-                    handler,
                 });
             }
         }
@@ -651,10 +655,17 @@ where
                     self.counters.dec_pending(&endpoint);
 
                     let (endpoint, concurrent_dial_errors) = match (endpoint, outgoing) {
-                        (PendingPoint::Dialer { role_override }, Some((address, errors))) => (
+                        (
+                            PendingPoint::Dialer {
+                                role_override,
+                                port_use,
+                            },
+                            Some((address, errors)),
+                        ) => (
                             ConnectedPoint::Dialer {
                                 address,
                                 role_override,
+                                port_use,
                             },
                             Some(errors),
                         ),
@@ -679,53 +690,32 @@ where
                         ),
                     };
 
-                    let error = self
-                        .counters
-                        // Check general established connection limit.
-                        .check_max_established(&endpoint)
-                        .map_err(PendingConnectionError::ConnectionLimit)
-                        // Check per-peer established connection limit.
-                        .and_then(|()| {
-                            self.counters
-                                .check_max_established_per_peer(num_peer_established(
-                                    &self.established,
-                                    obtained_peer_id,
-                                ))
-                                .map_err(PendingConnectionError::ConnectionLimit)
-                        })
-                        // Check expected peer id matches.
-                        .and_then(|()| {
-                            if let Some(peer) = expected_peer_id {
-                                if peer != obtained_peer_id {
-                                    Err(PendingConnectionError::WrongPeerId {
-                                        obtained: obtained_peer_id,
-                                        endpoint: endpoint.clone(),
-                                    })
-                                } else {
-                                    Ok(())
-                                }
-                            } else {
-                                Ok(())
-                            }
-                        })
-                        // Check peer is not local peer.
-                        .and_then(|()| {
-                            if self.local_id == obtained_peer_id {
-                                Err(PendingConnectionError::LocalPeerId {
+                    let check_peer_id = || {
+                        if let Some(peer) = expected_peer_id {
+                            if peer != obtained_peer_id {
+                                return Err(PendingConnectionError::WrongPeerId {
+                                    obtained: obtained_peer_id,
                                     endpoint: endpoint.clone(),
-                                })
-                            } else {
-                                Ok(())
+                                });
                             }
-                        });
+                        }
 
-                    if let Err(error) = error {
+                        if self.local_id == obtained_peer_id {
+                            return Err(PendingConnectionError::LocalPeerId {
+                                endpoint: endpoint.clone(),
+                            });
+                        }
+
+                        Ok(())
+                    };
+
+                    if let Err(error) = check_peer_id() {
                         self.executor.spawn(poll_fn(move |cx| {
                             if let Err(e) = ready!(muxer.poll_close_unpin(cx)) {
-                                log::debug!(
-                                    "Failed to close connection {:?} to peer {}: {:?}",
-                                    id,
-                                    obtained_peer_id,
+                                tracing::debug!(
+                                    peer=%obtained_peer_id,
+                                    connection=%id,
+                                    "Failed to close connection to peer: {:?}",
                                     e
                                 );
                             }
@@ -826,7 +816,7 @@ where
 ///
 /// On drop, this type send the connection back to the [`Pool`] where it will be gracefully closed.
 #[derive(Debug)]
-pub struct NewConnection {
+pub(crate) struct NewConnection {
     connection: Option<StreamMuxerBox>,
     drop_sender: Option<oneshot::Sender<StreamMuxerBox>>,
 }
@@ -864,8 +854,6 @@ impl Drop for NewConnection {
 /// Network connection information.
 #[derive(Debug, Clone)]
 pub struct ConnectionCounters {
-    /// The effective connection limits.
-    limits: ConnectionLimits,
     /// The current number of incoming connections.
     pending_incoming: u32,
     /// The current number of outgoing connections.
@@ -877,19 +865,13 @@ pub struct ConnectionCounters {
 }
 
 impl ConnectionCounters {
-    fn new(limits: ConnectionLimits) -> Self {
+    fn new() -> Self {
         Self {
-            limits,
             pending_incoming: 0,
             pending_outgoing: 0,
             established_incoming: 0,
             established_outgoing: 0,
         }
-    }
-
-    /// The effective connection limits.
-    pub fn limits(&self) -> &ConnectionLimits {
-        &self.limits
     }
 
     /// The total number of connections, both pending and established.
@@ -974,130 +956,24 @@ impl ConnectionCounters {
             }
         }
     }
-
-    fn check_max_pending_outgoing(&self) -> Result<(), ConnectionLimit> {
-        Self::check(self.pending_outgoing, self.limits.max_pending_outgoing)
-    }
-
-    fn check_max_pending_incoming(&self) -> Result<(), ConnectionLimit> {
-        Self::check(self.pending_incoming, self.limits.max_pending_incoming)
-    }
-
-    fn check_max_established(&self, endpoint: &ConnectedPoint) -> Result<(), ConnectionLimit> {
-        // Check total connection limit.
-        Self::check(self.num_established(), self.limits.max_established_total)?;
-        // Check incoming/outgoing connection limits
-        match endpoint {
-            ConnectedPoint::Dialer { .. } => Self::check(
-                self.established_outgoing,
-                self.limits.max_established_outgoing,
-            ),
-            ConnectedPoint::Listener { .. } => Self::check(
-                self.established_incoming,
-                self.limits.max_established_incoming,
-            ),
-        }
-    }
-
-    fn check_max_established_per_peer(&self, current: u32) -> Result<(), ConnectionLimit> {
-        Self::check(current, self.limits.max_established_per_peer)
-    }
-
-    fn check(current: u32, limit: Option<u32>) -> Result<(), ConnectionLimit> {
-        if let Some(limit) = limit {
-            if current >= limit {
-                return Err(ConnectionLimit { limit, current });
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Counts the number of established connections to the given peer.
-fn num_peer_established<TInEvent>(
-    established: &FnvHashMap<PeerId, FnvHashMap<ConnectionId, EstablishedConnection<TInEvent>>>,
-    peer: PeerId,
-) -> u32 {
-    established.get(&peer).map_or(0, |conns| {
-        u32::try_from(conns.len()).expect("Unexpectedly large number of connections for a peer.")
-    })
-}
-
-/// The configurable connection limits.
-///
-/// By default no connection limits apply.
-#[derive(Debug, Clone, Default)]
-pub struct ConnectionLimits {
-    max_pending_incoming: Option<u32>,
-    max_pending_outgoing: Option<u32>,
-    max_established_incoming: Option<u32>,
-    max_established_outgoing: Option<u32>,
-    max_established_per_peer: Option<u32>,
-    max_established_total: Option<u32>,
-}
-
-impl ConnectionLimits {
-    /// Configures the maximum number of concurrently incoming connections being established.
-    pub fn with_max_pending_incoming(mut self, limit: Option<u32>) -> Self {
-        self.max_pending_incoming = limit;
-        self
-    }
-
-    /// Configures the maximum number of concurrently outgoing connections being established.
-    pub fn with_max_pending_outgoing(mut self, limit: Option<u32>) -> Self {
-        self.max_pending_outgoing = limit;
-        self
-    }
-
-    /// Configures the maximum number of concurrent established inbound connections.
-    pub fn with_max_established_incoming(mut self, limit: Option<u32>) -> Self {
-        self.max_established_incoming = limit;
-        self
-    }
-
-    /// Configures the maximum number of concurrent established outbound connections.
-    pub fn with_max_established_outgoing(mut self, limit: Option<u32>) -> Self {
-        self.max_established_outgoing = limit;
-        self
-    }
-
-    /// Configures the maximum number of concurrent established connections (both
-    /// inbound and outbound).
-    ///
-    /// Note: This should be used in conjunction with
-    /// [`ConnectionLimits::with_max_established_incoming`] to prevent possible
-    /// eclipse attacks (all connections being inbound).
-    pub fn with_max_established(mut self, limit: Option<u32>) -> Self {
-        self.max_established_total = limit;
-        self
-    }
-
-    /// Configures the maximum number of concurrent established connections per peer,
-    /// regardless of direction (incoming or outgoing).
-    pub fn with_max_established_per_peer(mut self, limit: Option<u32>) -> Self {
-        self.max_established_per_peer = limit;
-        self
-    }
 }
 
 /// Configuration options when creating a [`Pool`].
 ///
 /// The default configuration specifies no dedicated task executor, a
 /// task event buffer size of 32, and a task command buffer size of 7.
-pub struct PoolConfig {
+pub(crate) struct PoolConfig {
     /// Executor to use to spawn tasks.
-    pub executor: Option<Box<dyn Executor + Send>>,
-
+    pub(crate) executor: Option<Box<dyn Executor + Send>>,
     /// Size of the task command buffer (per task).
-    pub task_command_buffer_size: usize,
-
+    pub(crate) task_command_buffer_size: usize,
     /// Size of the pending connection task event buffer and the established connection task event
     /// buffer.
-    pub per_connection_event_buffer_size: usize,
-
+    pub(crate) per_connection_event_buffer_size: usize,
     /// Number of addresses concurrently dialed for a single outbound connection attempt.
-    pub dial_concurrency_factor: NonZeroU8,
-
+    pub(crate) dial_concurrency_factor: NonZeroU8,
+    /// How long a connection should be kept alive once it is idling.
+    pub(crate) idle_connection_timeout: Duration,
     /// The configured override for substream protocol upgrades, if any.
     substream_upgrade_protocol_override: Option<libp2p_core::upgrade::Version>,
 
@@ -1108,12 +984,13 @@ pub struct PoolConfig {
 }
 
 impl PoolConfig {
-    pub fn new(executor: Option<Box<dyn Executor + Send>>) -> Self {
+    pub(crate) fn new(executor: Option<Box<dyn Executor + Send>>) -> Self {
         Self {
             executor,
             task_command_buffer_size: 32,
             per_connection_event_buffer_size: 7,
             dial_concurrency_factor: NonZeroU8::new(8).expect("8 > 0"),
+            idle_connection_timeout: Duration::from_secs(10),
             substream_upgrade_protocol_override: None,
             max_negotiating_inbound_streams: 128,
         }
@@ -1124,9 +1001,9 @@ impl PoolConfig {
     /// delivery to the connection handler.
     ///
     /// When the buffer for a particular connection is full, `notify_handler` will no
-    /// longer be able to deliver events to the associated [`Connection`](super::Connection),
+    /// longer be able to deliver events to the associated [`Connection`],
     /// thus exerting back-pressure on the connection and peer API.
-    pub fn with_notify_handler_buffer_size(mut self, n: NonZeroUsize) -> Self {
+    pub(crate) fn with_notify_handler_buffer_size(mut self, n: NonZeroUsize) -> Self {
         self.task_command_buffer_size = n.get() - 1;
         self
     }
@@ -1137,19 +1014,19 @@ impl PoolConfig {
     /// When the buffer is full, the background tasks of all connections will stall.
     /// In this way, the consumers of network events exert back-pressure on
     /// the network connection I/O.
-    pub fn with_per_connection_event_buffer_size(mut self, n: usize) -> Self {
+    pub(crate) fn with_per_connection_event_buffer_size(mut self, n: usize) -> Self {
         self.per_connection_event_buffer_size = n;
         self
     }
 
     /// Number of addresses concurrently dialed for a single outbound connection attempt.
-    pub fn with_dial_concurrency_factor(mut self, factor: NonZeroU8) -> Self {
+    pub(crate) fn with_dial_concurrency_factor(mut self, factor: NonZeroU8) -> Self {
         self.dial_concurrency_factor = factor;
         self
     }
 
     /// Configures an override for the substream upgrade protocol to use.
-    pub fn with_substream_upgrade_protocol_override(
+    pub(crate) fn with_substream_upgrade_protocol_override(
         mut self,
         v: libp2p_core::upgrade::Version,
     ) -> Self {
@@ -1160,33 +1037,8 @@ impl PoolConfig {
     /// The maximum number of inbound streams concurrently negotiating on a connection.
     ///
     /// See [`Connection::max_negotiating_inbound_streams`].
-    pub fn with_max_negotiating_inbound_streams(mut self, v: usize) -> Self {
+    pub(crate) fn with_max_negotiating_inbound_streams(mut self, v: usize) -> Self {
         self.max_negotiating_inbound_streams = v;
         self
-    }
-}
-
-trait EntryExt<'a, K, V> {
-    fn expect_occupied(self, msg: &'static str) -> hash_map::OccupiedEntry<'a, K, V>;
-}
-
-impl<'a, K: 'a, V: 'a> EntryExt<'a, K, V> for hash_map::Entry<'a, K, V> {
-    fn expect_occupied(self, msg: &'static str) -> hash_map::OccupiedEntry<'a, K, V> {
-        match self {
-            hash_map::Entry::Occupied(entry) => entry,
-            hash_map::Entry::Vacant(_) => panic!("{}", msg),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use futures::future::Future;
-
-    struct Dummy;
-
-    impl Executor for Dummy {
-        fn exec(&self, _: Pin<Box<dyn Future<Output = ()> + Send>>) {}
     }
 }

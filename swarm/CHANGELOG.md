@@ -1,4 +1,277 @@
-# 0.42.0
+## 0.46.0
+
+- Don't report `NewExternalAddrCandidate` for confirmed external addresses.
+  See [PR 5582](https://github.com/libp2p/rust-libp2p/pull/5582).
+
+- Deprecate `void` crate.
+  See [PR 5676](https://github.com/libp2p/rust-libp2p/pull/5676).
+
+- Fix `cargo clippy` warnings in `rustc 1.84.0-beta.1`.
+  See [PR 5700](https://github.com/libp2p/rust-libp2p/pull/5700).
+
+- Update default for idle-connection-timeout to 10s.
+  See [PR 4967](https://github.com/libp2p/rust-libp2p/pull/4967).
+
+- Deprecate `ConnectionHandler::{InboundOpenInfo, OutboundOpenInfo}` associated type.  
+  Previously, users could tag pending sub streams with custom data and retrieve the data 
+  after the substream has been negotiated.
+  But substreams themselves are completely interchangeable, users should instead track 
+  additional data inside `ConnectionHandler` after negotiation.   
+  See [PR 5242](https://github.com/libp2p/rust-libp2p/pull/5242).
+
+<!-- Update to libp2p-core v0.43.0 -->
+
+## 0.45.1
+
+- Update `libp2p-swarm-derive` to version `0.35.0`, see [PR 5545]
+
+[PR 5545]: https://github.com/libp2p/rust-libp2p/pull/5545
+
+## 0.45.0
+
+- Implement refactored `Transport`.
+  See [PR 4568]
+- Move `address_translation` into swarm and into `libp2p-identify`.
+  See [PR 4568]
+
+[PR 4568]: https://github.com/libp2p/rust-libp2p/pull/4568
+
+## 0.44.3
+- Optimize internal connection `fn poll`. New implementation now scales much better with number of listen protocols active.
+  No changes to public API introduced.
+  See [PR 5026](https://github.com/libp2p/rust-libp2p/pull/5026)
+- Add peer_id to `FromSwarm::ListenFailure`.
+  See [PR 4818](https://github.com/libp2p/rust-libp2p/pull/4818).
+- Use `web-time` instead of `instant`.
+  See [PR 5347](https://github.com/libp2p/rust-libp2p/pull/5347).
+- Add `#[track_caller]` on all `spawn` wrappers.
+  See [PR 5465](https://github.com/libp2p/rust-libp2p/pull/5465).
+- Add ConnectionError to FromSwarm::ConnectionClosed.
+  See [PR 5485](https://github.com/libp2p/rust-libp2p/pull/5485).
+
+## 0.44.2
+
+- Allow `NetworkBehaviour`s to share addresses of peers.
+  This is enabled via the new `ToSwarm::NewExternalAddrOfPeer` event.
+  The address is broadcast to all behaviours via `FromSwarm::NewExternalAddrOfPeer`.
+  Protocols that want to collect these addresses can use the new `PeerAddresses` utility.
+  See [PR 4371](https://github.com/libp2p/rust-libp2p/pull/4371).
+
+## 0.44.1
+
+- Implement `Clone` & `Copy` for `FromSwarm.
+  This makes it easier to forward these events when wrapping other behaviours.
+  See [PR 4825](https://github.com/libp2p/rust-libp2p/pull/4825).
+
+## 0.44.0
+
+- Add `#[non_exhaustive]` to `FromSwarm`, `ToSwarm`, `SwarmEvent`, `ConnectionHandlerEvent`, `ConnectionEvent`.
+  See [PR 4581](https://github.com/libp2p/rust-libp2p/pull/4581).
+- Remove `handler` field from `ConnectionClosed`.
+  If you need to transfer state from a `ConnectionHandler` to its `NetworkBehaviour` when a connection closes, use `ConnectionHandler::poll_close`.
+  See [PR 4076](https://github.com/libp2p/rust-libp2p/pull/4076).
+- Remove deprecated `PollParameters` from `NetworkBehaviour::poll` function.
+  See [PR 4490](https://github.com/libp2p/rust-libp2p/pull/4490).
+- Remove deprecated `ConnectionHandlerEvent::Close` and `ConnectionHandler::Error`.
+  `ConnectionHandler`s should not close connections directly as the connection might still be in use by other handlers.
+  See [PR 4755](https://github.com/libp2p/rust-libp2p/pull/4755).
+- Add `PeerCondition::DisconnectedAndNotDialing` variant, combining pre-existing conditions.
+  This is the new default.
+  A new dialing attempt is initiated _only if_ the peer is both considered disconnected and there is currently no ongoing dialing attempt.
+  See [PR 4225](https://github.com/libp2p/rust-libp2p/pull/4225).
+- Remove deprecated `keep_alive_timeout` in `OneShotHandlerConfig`.
+  See [PR 4677](https://github.com/libp2p/rust-libp2p/pull/4677).
+- Don't close entire connection upon `DialUpgradeError`s within `OneShotHandler`.
+  Instead, the error is reported as `Err(e)` via `ConnectionHandler::ToBehaviour`.
+  See [PR 4715](https://github.com/libp2p/rust-libp2p/pull/4715).
+- Log `PeerId` of `Swarm` even when constructed with new `SwarmBuilder`.
+  See [PR 4671](https://github.com/libp2p/rust-libp2p/pull/4671).
+- Add `SwarmEvent::{NewExternalAddrCandidate,ExternalAddrConfirmed,ExternalAddrExpired}` variants.
+  See [PR 4721](https://github.com/libp2p/rust-libp2p/pull/4721).
+- Remove deprecated symbols.
+  See [PR 4737](https://github.com/libp2p/rust-libp2p/pull/4737).
+
+## 0.43.7
+
+- Deprecate `ConnectionHandlerEvent::Close`.
+  See [issue 3591](https://github.com/libp2p/rust-libp2p/issues/3591) for details.
+  See [PR 4714](https://github.com/libp2p/rust-libp2p/pull/4714).
+
+## 0.43.6
+
+- Deprecate `libp2p::swarm::SwarmBuilder`.
+  Most users should use `libp2p::SwarmBuilder`.
+  In some special cases, users may need to use `Swarm::new` and `Config` instead of the new `libp2p::SwarmBuilder`.
+  See [PR 4120].
+- Make the `Debug` implementation of `StreamProtocol` more concise.
+  See [PR 4631](https://github.com/libp2p/rust-libp2p/pull/4631).
+- Fix overflow in `KeepAlive` computation that could occur panic at `Delay::new` if `SwarmBuilder::idle_connection_timeout` is configured too large.
+  See [PR 4644](https://github.com/libp2p/rust-libp2p/pull/4644).
+- Deprecate `KeepAlive::Until`.
+  Individual protocols should not keep connections alive for longer than necessary.
+  Users should use `swarm::Config::idle_connection_timeout` instead.
+  See [PR 4656](https://github.com/libp2p/rust-libp2p/pull/4656).
+- Deprecate `keep_alive_timeout` in `OneShotHandlerConfig`.
+  See [PR 4680](https://github.com/libp2p/rust-libp2p/pull/4680).
+
+[PR 4120]: https://github.com/libp2p/rust-libp2p/pull/4120
+
+## 0.43.5
+
+- Fix overflow in `KeepAlive` computation that could occur if `SwarmBuilder::idle_connection_timeout` is configured with `u64::MAX`.
+  See [PR 4559](https://github.com/libp2p/rust-libp2p/pull/4559).
+
+## 0.43.4
+
+- Implement `Debug` for event structs.
+  See [PR 4426].
+
+- Improve error message when `DialPeerCondition` prevents a dial.
+  See [PR 4409].
+
+- Introduce `SwarmBuilder::idle_connection_timeout` and deprecate `keep_alive::Behaviour` as a result.
+  See [PR 4161].
+
+[PR 4426]: https://github.com/libp2p/rust-libp2p/pull/4426
+[PR 4409]: https://github.com/libp2p/rust-libp2p/pull/4409
+[PR 4161]: https://github.com/libp2p/rust-libp2p/pull/4161
+
+## 0.43.3
+
+- Implement `Display` for `ConnectionId`.
+  See [PR 4278].
+
+[PR 4278]: https://github.com/libp2p/rust-libp2p/pull/4278
+
+## 0.43.2
+- Display the cause of a `ListenError::Denied`.
+  See [PR 4232]
+
+[PR 4232]: https://github.com/libp2p/rust-libp2p/pull/4158
+
+## 0.43.1
+
+- Do not announce external address candidate before address translation, unless translation does not apply.
+  This will prevent ephemeral TCP addresses being announced as external address candidates.
+  See [PR 4158].
+
+[PR 4158]: https://github.com/libp2p/rust-libp2p/pull/4158
+
+## 0.43.0
+
+- Allow `NetworkBehaviours` to create and remove listeners.
+  See [PR 3292].
+
+- Raise MSRV to 1.65.
+  See [PR 3715].
+
+- Introduce `StreamProtocol` type.
+  This type enforces invariants on protocol names, such as leading forward slashes and correct UTF8 encoding.
+  See [PR 3746].
+
+- Return a bool from `ExternalAddresses::on_swarm_event` and `ListenAddresses::on_swarm_event` indicating whether any state was changed.
+  See [PR 3865].
+
+- Remove deprecated banning API from `Swarm`.
+  Users should migrate to `libp2p::allow_block_list`.
+  See [PR 3886].
+
+- Remove `ConnectionHandlerUpgrErr::Timer` variant.
+  This variant was never constructed and thus dead code.
+  See [PR 3605].
+
+- Remove deprecated `IntoConnectionHandler` and all its implementations.
+  This also removes the `NetworkBehaviour::new_handler` and `NetworkBehaviour::addresses_of_peer` methods.
+  See changelog for `0.42` on how to migrate.
+  See [PR 3884].
+
+- Remove `ConnectionHandlerUpgrErr::Timer` variant.
+  This variant was never constructed and thus dead code.
+  See [PR 3605].
+
+- Flatten `ConnectionHandlerUpgrErr` and rename to `StreamUpgradeError`.
+  See [PR 3882].
+
+- Remove deprecated `ConnectionLimits`.
+  Users should migrate to `libp2p::connection_limits::Behaviour`.
+  See [PR 3885].
+
+- Allow `ConnectionHandler`s to report and learn about the supported protocols on a connection.
+  The newly introduced API elements are:
+  - `ConnectionHandlerEvent::ReportRemoteProtocols`
+  - `ConnectionEvent::LocalProtocolsChange`
+  - `ConnectionEvent::RemoteProtocolsChange`
+
+  See [PR 3651].
+
+- Deprecate the `NegotiatedSubstream` type and replace it with `Stream`.
+  See [PR 3912].
+
+- Rename `NetworkBehaviour::OutEvent` to `NetworkBehaviour::ToSwarm`, `ConnectionHandler::InEvent` to `ConnectionHandler::FromBehaviour`, `ConnectionHandler::OutEvent` to `ConnectionHandler::ToBehaviour`. See [PR 3848].
+
+- Remove deprecated `NetworkBehaviourAction` type.
+  See [PR 3919].
+
+- Expose `ConnectionId` on `SwarmEvent::{ConnectionEstablished,ConnectionClosed,IncomingConnection,IncomingConnectionError,OutgoingConnectionError,Dialing}`.
+  Also emit `SwarmEvent::Dialing` for dials with unknown `PeerId`.
+  See [PR 3927].
+
+- Rename `ConnectionHandlerEvent::Custom` to `ConnectionHandlerEvent::NotifyBehaviour`. See [PR 3955].
+
+- Remove `DialError::InvalidPeerId` variant. With the move to `multiaddr` `v0.18.0` peer IDs in `/p2p` are type safe and thus usage of the contained peer ID can not result in a parsing error.
+  See [PR 4037].
+
+- Remove deprecated items. See [PR 3956].
+
+- Add ability to `downcast_ref` ConnectionDenied errors. See [PR 4020].
+
+[PR 3292]: https://github.com/libp2p/rust-libp2p/pull/3292
+[PR 3605]: https://github.com/libp2p/rust-libp2p/pull/3605
+[PR 3651]: https://github.com/libp2p/rust-libp2p/pull/3651
+[PR 3715]: https://github.com/libp2p/rust-libp2p/pull/3715
+[PR 3746]: https://github.com/libp2p/rust-libp2p/pull/3746
+[PR 3848]: https://github.com/libp2p/rust-libp2p/pull/3848
+[PR 3865]: https://github.com/libp2p/rust-libp2p/pull/3865
+[PR 3882]: https://github.com/libp2p/rust-libp2p/pull/3882
+[PR 3884]: https://github.com/libp2p/rust-libp2p/pull/3884
+[PR 3885]: https://github.com/libp2p/rust-libp2p/pull/3885
+[PR 3886]: https://github.com/libp2p/rust-libp2p/pull/3886
+[PR 3912]: https://github.com/libp2p/rust-libp2p/pull/3912
+[PR 3919]: https://github.com/libp2p/rust-libp2p/pull/3919
+[PR 3927]: https://github.com/libp2p/rust-libp2p/pull/3927
+[PR 3955]: https://github.com/libp2p/rust-libp2p/pull/3955
+[PR 3956]: https://github.com/libp2p/rust-libp2p/pull/3956
+[PR 4020]: https://github.com/libp2p/rust-libp2p/pull/4020
+[PR 4037]: https://github.com/libp2p/rust-libp2p/pull/4037
+
+## 0.42.2
+
+- Add `ConnectionEvent::{is_outbound,is_inbound}`. See [PR 3625].
+
+[PR 3625]: https://github.com/libp2p/rust-libp2p/pull/3625
+
+## 0.42.1
+
+- Deprecate `ConnectionLimits` in favor of `libp2p::connection_limits`.
+  See [PR 3386].
+
+- Introduce `ConnectionId::new_unchecked` to allow for more sophisticated, manual tests of `NetworkBehaviour`.
+  See [PR 3652].
+
+- Deprecate `Swarm::ban_peer_id` in favor of the new `libp2p::allow_block_list` module.
+  See [PR 3590].
+
+- Rename `NetworkBehaviourAction` to `ToSwarm`.
+  A deprecated type-alias is provided to ease the transition.
+  The new name is meant to better indicate the message-passing relationship between `Swarm` and `NetworkBehaviour`.
+  See [PR 3658].
+
+[PR 3386]: https://github.com/libp2p/rust-libp2p/pull/3386
+[PR 3652]: https://github.com/libp2p/rust-libp2p/pull/3652
+[PR 3590]: https://github.com/libp2p/rust-libp2p/pull/3590
+[PR 3658]: https://github.com/libp2p/rust-libp2p/pull/3658
+
+## 0.42.0
 
 - Allow `NetworkBehaviour`s to manage connections.
   We deprecate `NetworkBehaviour::new_handler` and `NetworkBehaviour::addresses_of_peer` in favor of four new callbacks:
@@ -87,6 +360,11 @@
 
 - Remove `ConnectionId::new`. Manually creating `ConnectionId`s is now unsupported. See [PR 3327].
 
+- Deprecate methods `Swarm::with_executor`, `Swarm::with_*_executor`, `Swarm::without_executor`.
+  Introduce similar methods in `SwarmBuilder`. See [PR 3588].
+
+- Gracefully disable oneshot handler on dial upgrade errors. See [PR 3577].
+
 [PR 3364]: https://github.com/libp2p/rust-libp2p/pull/3364
 [PR 3170]: https://github.com/libp2p/rust-libp2p/pull/3170
 [PR 3134]: https://github.com/libp2p/rust-libp2p/pull/3134
@@ -102,12 +380,14 @@
 [PR 3375]: https://github.com/libp2p/rust-libp2p/pull/3375
 [PR 3254]: https://github.com/libp2p/rust-libp2p/pull/3254
 [PR 3497]: https://github.com/libp2p/rust-libp2p/pull/3497
+[PR 3588]: https://github.com/libp2p/rust-libp2p/pull/3588
+[PR 3577]: https://github.com/libp2p/rust-libp2p/pull/3577
 
-# 0.41.1
+## 0.41.1
 
 - Update to `libp2p-swarm-derive` `v0.31.0`.
 
-# 0.41.0
+## 0.41.0
 
 - Update to `libp2p-core` `v0.38.0`.
 
@@ -212,7 +492,7 @@
 [Issue 3107]: https://github.com/libp2p/rust-libp2p/issues/3107
 [PR 3090]: https://github.com/libp2p/rust-libp2p/pull/3090
 
-# 0.40.1
+## 0.40.1
 
 - Bump rand to 0.8 and quickcheck to 1. See [PR 2857].
 
@@ -230,7 +510,7 @@
 [PR 2928]: https://github.com/libp2p/rust-libp2p/pull/2928
 
 
-# 0.39.0
+## 0.39.0
 
 - Remove deprecated `NetworkBehaviourEventProcess`. See [libp2p-swarm v0.38.0 changelog entry] for
   migration path.
@@ -244,7 +524,7 @@
 [libp2p-swarm v0.38.0 changelog entry]: https://github.com/libp2p/rust-libp2p/blob/master/swarm/CHANGELOG.md#0380
 [PR 2861]: https://github.com/libp2p/rust-libp2p/pull/2861/
 
-# 0.38.0
+## 0.38.0
 
 - Deprecate `NetworkBehaviourEventProcess`. When deriving `NetworkBehaviour` on a custom `struct` users
   should either bring their own `OutEvent` via `#[behaviour(out_event = "MyBehaviourEvent")]` or,
@@ -331,7 +611,7 @@
 [PR 2784]: https://github.com/libp2p/rust-libp2p/pull/2784
 [PR 2792]: https://github.com/libp2p/rust-libp2p/pull/2792
 
-# 0.37.0
+## 0.37.0
 
 - Update to `libp2p-core` `v0.34.0`.
 
@@ -342,13 +622,13 @@
 [PR 2716]: https://github.com/libp2p/rust-libp2p/pull/2716/
 [PR 2652]: https://github.com/libp2p/rust-libp2p/pull/2652
 
-# 0.36.1
+## 0.36.1
 
 - Limit negotiating inbound substreams per connection. See [PR 2697].
 
 [PR 2697]: https://github.com/libp2p/rust-libp2p/pull/2697
 
-# 0.36.0
+## 0.36.0
 
 - Don't require `Transport` to be `Clone`. See [PR 2529].
 
@@ -365,7 +645,7 @@
 [PR 2620]: https://github.com/libp2p/rust-libp2p/pull/2620
 [PR 2640]: https://github.com/libp2p/rust-libp2p/pull/2640
 
-# 0.35.0
+## 0.35.0
 
 - Add impl `IntoIterator` for `MultiHandler`. See [PR 2572].
 - Remove `Send` bound from `NetworkBehaviour`. See [PR 2535].
@@ -373,10 +653,10 @@
 [PR 2572]: https://github.com/libp2p/rust-libp2p/pull/2572/
 [PR 2535]: https://github.com/libp2p/rust-libp2p/pull/2535/
 
-# 0.34.0 [2022-02-22]
+## 0.34.0 [2022-02-22]
 
 - Rename `ProtocolsHandler` to `ConnectionHandler`. Upgrade should be as simple as renaming all
-  occurences of `ProtocolsHandler` to `ConnectionHandler` with your favorite text manipulation tool
+  occurrences of `ProtocolsHandler` to `ConnectionHandler` with your favorite text manipulation tool
   across your codebase. See [PR 2527].
 
 - Fold `libp2p-core`'s `Network` into `Swarm`. See [PR 2492].
@@ -391,7 +671,7 @@
 [PR 2517]: https://github.com/libp2p/rust-libp2p/pull/2517
 [PR 2527]: https://github.com/libp2p/rust-libp2p/pull/2527
 
-# 0.33.0 [2022-01-27]
+## 0.33.0 [2022-01-27]
 
 - Patch reporting on banned peers and their non-banned and banned connections (see [PR 2350]).
 
@@ -430,7 +710,7 @@
 [PR 2363]: https://github.com/libp2p/rust-libp2p/pull/2363
 [PR 2445]: https://github.com/libp2p/rust-libp2p/pull/2445
 
-# 0.32.0 [2021-11-16]
+## 0.32.0 [2021-11-16]
 
 - Use `instant` and `futures-timer` instead of `wasm-timer` (see [PR 2245]).
 
@@ -478,7 +758,7 @@
 [PR 2245]: https://github.com/libp2p/rust-libp2p/pull/2245
 [PR 2317]: https://github.com/libp2p/rust-libp2p/pull/2317
 
-# 0.31.0 [2021-11-01]
+## 0.31.0 [2021-11-01]
 
 - Make default features of `libp2p-core` optional.
   [PR 2181](https://github.com/libp2p/rust-libp2p/pull/2181)
@@ -550,7 +830,7 @@
 [PR 2248]: https://github.com/libp2p/rust-libp2p/pull/2248
 [PR 2261]: https://github.com/libp2p/rust-libp2p/pull/2261
 
-# 0.30.0 [2021-07-12]
+## 0.30.0 [2021-07-12]
 
 - Update dependencies.
 
@@ -579,7 +859,7 @@
 [PR 2110]: https://github.com/libp2p/rust-libp2p/pull/2110/
 [PR 2123]: https://github.com/libp2p/rust-libp2p/pull/2123
 
-# 0.29.0 [2021-04-13]
+## 0.29.0 [2021-04-13]
 
 - Remove `Deref` and `DerefMut` implementations previously dereferencing to the
   `NetworkBehaviour` on `Swarm`. Instead one can access the `NetworkBehaviour`
@@ -598,7 +878,7 @@
   inject_{new,expired}_listen_addr` provide a `ListenerId` [PR
   2011](https://github.com/libp2p/rust-libp2p/pull/2011).
 
-# 0.28.0 [2021-03-17]
+## 0.28.0 [2021-03-17]
 
 - New error variant `DialError::InvalidAddress`
 
@@ -610,12 +890,12 @@
   There is a `Swarm`-scoped configuration for this version available since
   [1858](https://github.com/libp2p/rust-libp2p/pull/1858).
 
-# 0.27.2 [2021-02-04]
+## 0.27.2 [2021-02-04]
 
 - Have `ToggleProtoHandler` ignore listen upgrade errors when disabled.
   [PR 1945](https://github.com/libp2p/rust-libp2p/pull/1945/files).
 
-# 0.27.1 [2021-01-27]
+## 0.27.1 [2021-01-27]
 
 - Make `OneShotHandler`s `max_dial_negotiate` limit configurable.
   [PR 1936](https://github.com/libp2p/rust-libp2p/pull/1936).
@@ -623,11 +903,11 @@
 - Fix handling of DialPeerCondition::Always.
   [PR 1937](https://github.com/libp2p/rust-libp2p/pull/1937).
 
-# 0.27.0 [2021-01-12]
+## 0.27.0 [2021-01-12]
 
 - Update dependencies.
 
-# 0.26.0 [2020-12-17]
+## 0.26.0 [2020-12-17]
 
 - Update `libp2p-core`.
 
@@ -635,12 +915,12 @@
   a `NetworkBehaviour` to a `ProtocolsHandler` to be `Clone`.
   [PR 1880](https://github.com/libp2p/rust-libp2p/pull/1880).
 
-# 0.25.1 [2020-11-26]
+## 0.25.1 [2020-11-26]
 
 - Add `ExpandedSwarm::is_connected`.
   [PR 1862](https://github.com/libp2p/rust-libp2p/pull/1862).
 
-# 0.25.0 [2020-11-25]
+## 0.25.0 [2020-11-25]
 
 - Permit a configuration override for the substream upgrade protocol
   to use for all (outbound) substreams.
@@ -656,11 +936,11 @@
   retained "forever" (or until explicitly removed).
   [PR 1842](https://github.com/libp2p/rust-libp2p/pull/1842).
 
-# 0.24.0 [2020-11-09]
+## 0.24.0 [2020-11-09]
 
 - Update dependencies.
 
-# 0.23.0 [2020-10-16]
+## 0.23.0 [2020-10-16]
 
 - Require a `Boxed` transport to be given to the `Swarm`
   or `SwarmBuilder` to avoid unnecessary double-boxing of
@@ -675,13 +955,13 @@
   pending outbound upgrades. As a result only those upgrades are polled that are
   ready to progress.
 
-  Implementors of `InboundUpgrade` and `OutboundUpgrade` need to ensure to wake
+  Implementers of `InboundUpgrade` and `OutboundUpgrade` need to ensure to wake
   up the underlying task once they are ready to make progress as they won't be
   polled otherwise.
 
   [PR 1775](https://github.com/libp2p/rust-libp2p/pull/1775)
 
-# 0.22.0 [2020-09-09]
+## 0.22.0 [2020-09-09]
 
 - Bump `libp2p-core` dependency.
 
@@ -695,7 +975,7 @@
   now. Consequently `ProtocolsHandlerEvent::OutboundSubstreamRequest` no longer
   has a separate `info` field.
 
-# 0.21.0 [2020-08-18]
+## 0.21.0 [2020-08-18]
 
 - Add missing delegation calls in some `ProtocolsHandler` wrappers.
 See [PR 1710](https://github.com/libp2p/rust-libp2p/pull/1710).
@@ -716,7 +996,7 @@ callback.
 - Fix connections being kept alive by `OneShotHandler` when not handling any
   requests [PR 1698](https://github.com/libp2p/rust-libp2p/pull/1698).
 
-# 0.20.1 [2020-07-08]
+## 0.20.1 [2020-07-08]
 
 - Documentation updates.
 
@@ -727,7 +1007,7 @@ even happen in genuine situations, e.g. after the local node changed
 its network identity and a behaviour makes a dialing attempt to a
 former identity using the same addresses.
 
-# 0.20.0 [2020-07-01]
+## 0.20.0 [2020-07-01]
 
 - Updated the `libp2p-core` dependency.
 
@@ -740,7 +1020,7 @@ retain existing behaviour.
 `NetworkBehaviour::inject_address_change` to notify of a change in
 the address of an existing connection.
 
-# 0.19.1 [2020-06-18]
+## 0.19.1 [2020-06-18]
 
 - Bugfix: Fix MultiHandler panicking when empty
   ([PR 1598](https://github.com/libp2p/rust-libp2p/pull/1598)).

@@ -43,21 +43,23 @@
 //! implementations, due to undefined elements in the current specification.
 //!
 //! - **Topics** -  In gossipsub, topics configurable by the `hash_topics` configuration parameter.
-//! Topics are of type [`TopicHash`]. The current go implementation uses raw utf-8 strings, and this
-//! is default configuration in rust-libp2p. Topics can be hashed (SHA256 hashed then base64
-//! encoded) by setting the `hash_topics` configuration parameter to true.
+//!   Topics are of type [`TopicHash`]. The current go implementation uses raw utf-8 strings, and
+//!   this is default configuration in rust-libp2p. Topics can be hashed (SHA256 hashed then base64
+//!   encoded) by setting the `hash_topics` configuration parameter to true.
 //!
 //! - **Sequence Numbers** - A message on the gossipsub network is identified by the source
-//! [`libp2p_core::PeerId`] and a nonce (sequence number) of the message. The sequence numbers in
-//! this implementation are sent as raw bytes across the wire. They are 64-bit big-endian unsigned
-//! integers. They are chosen at random in this implementation of gossipsub, but are sequential in
-//! the current go implementation.
+//!   [`PeerId`](libp2p_identity::PeerId) and a nonce (sequence number) of the message. The sequence
+//!   numbers in this implementation are sent as raw bytes across the wire. They are 64-bit
+//!   big-endian unsigned integers. When messages are signed, they are monotonically increasing
+//!   integers starting from a random value and wrapping around u64::MAX. When messages are
+//!   unsigned, they are chosen at random. NOTE: These numbers are sequential in the current go
+//!   implementation.
 //!
 //! # Peer Discovery
 //!
 //! Gossipsub does not provide peer discovery by itself. Peer discovery is the process by which
-//! peers in a p2p network exchange information about each other among other reasons to become resistant
-//! against the failure or replacement of the
+//! peers in a p2p network exchange information about each other among other reasons to become
+//! resistant against the failure or replacement of the
 //! [boot nodes](https://docs.libp2p.io/reference/glossary/#boot-node) of the network.
 //!
 //! Peer
@@ -82,139 +84,55 @@
 //!
 //! The [`Behaviour`] struct implements the [`libp2p_swarm::NetworkBehaviour`] trait allowing it to
 //! act as the routing behaviour in a [`libp2p_swarm::Swarm`]. This struct requires an instance of
-//! [`libp2p_core::PeerId`] and [`Config`].
+//! [`PeerId`](libp2p_identity::PeerId) and [`Config`].
 //!
 //! [`Behaviour`]: struct.Behaviour.html
 
 //! ## Example
 //!
-//! An example of initialising a gossipsub compatible swarm:
-//!
-//! ```
-//! use libp2p_gossipsub::Event;
-//! use libp2p_core::{identity::Keypair,transport::{Transport, MemoryTransport}, Multiaddr};
-//! use libp2p_gossipsub::MessageAuthenticity;
-//! let local_key = Keypair::generate_ed25519();
-//! let local_peer_id = libp2p_core::PeerId::from(local_key.public());
-//!
-//! // Set up an encrypted TCP Transport over the Mplex
-//! // This is test transport (memory).
-//! let transport = MemoryTransport::default()
-//!            .upgrade(libp2p_core::upgrade::Version::V1)
-//!            .authenticate(libp2p_noise::NoiseAuthenticated::xx(&local_key).unwrap())
-//!            .multiplex(libp2p_mplex::MplexConfig::new())
-//!            .boxed();
-//!
-//! // Create a Gossipsub topic
-//! let topic = libp2p_gossipsub::IdentTopic::new("example");
-//!
-//! // Set the message authenticity - How we expect to publish messages
-//! // Here we expect the publisher to sign the message with their key.
-//! let message_authenticity = MessageAuthenticity::Signed(local_key);
-//!
-//! // Create a Swarm to manage peers and events
-//! let mut swarm = {
-//!     // set default parameters for gossipsub
-//!     let gossipsub_config = libp2p_gossipsub::Config::default();
-//!     // build a gossipsub network behaviour
-//!     let mut gossipsub: libp2p_gossipsub::Behaviour =
-//!         libp2p_gossipsub::Behaviour::new(message_authenticity, gossipsub_config).unwrap();
-//!     // subscribe to the topic
-//!     gossipsub.subscribe(&topic);
-//!     // create the swarm (use an executor in a real example)
-//!     libp2p_swarm::Swarm::without_executor(
-//!         transport,
-//!         gossipsub,
-//!         local_peer_id,
-//!     )
-//! };
-//!
-//! // Listen on a memory transport.
-//! let memory: Multiaddr = libp2p_core::multiaddr::Protocol::Memory(10).into();
-//! let addr = swarm.listen_on(memory).unwrap();
-//! println!("Listening on {:?}", addr);
-//! ```
+//! For an example on how to use gossipsub, see the [chat-example](https://github.com/libp2p/rust-libp2p/tree/master/examples/chat).
 
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
-
-pub mod error;
-pub mod metrics;
-pub mod protocol;
-pub mod subscription_filter;
-pub mod time_cache;
 
 mod backoff;
 mod behaviour;
 mod config;
-mod error_priv;
+mod error;
 mod gossip_promises;
 mod handler;
 mod mcache;
+mod metrics;
 mod peer_score;
+mod protocol;
+mod rpc;
+mod rpc_proto;
+mod subscription_filter;
+mod time_cache;
 mod topic;
 mod transform;
 mod types;
 
-mod rpc_proto;
-
-pub use self::behaviour::{Behaviour, Event, MessageAuthenticity};
-pub use self::config::{Config, ConfigBuilder, ValidationMode, Version};
-pub use self::error_priv::{HandlerError, PublishError, SubscriptionError, ValidationError};
-pub use self::peer_score::{
-    score_parameter_decay, score_parameter_decay_with_base, PeerScoreParams, PeerScoreThresholds,
-    TopicScoreParams,
+pub use self::{
+    behaviour::{Behaviour, Event, MessageAuthenticity},
+    config::{Config, ConfigBuilder, ValidationMode, Version},
+    error::{ConfigBuilderError, PublishError, SubscriptionError, ValidationError},
+    metrics::Config as MetricsConfig,
+    peer_score::{
+        score_parameter_decay, score_parameter_decay_with_base, PeerScoreParams,
+        PeerScoreThresholds, TopicScoreParams,
+    },
+    subscription_filter::{
+        AllowAllSubscriptionFilter, CallbackSubscriptionFilter, CombinedSubscriptionFilters,
+        MaxCountSubscriptionFilter, RegexSubscriptionFilter, TopicSubscriptionFilter,
+        WhitelistSubscriptionFilter,
+    },
+    topic::{Hasher, Topic, TopicHash},
+    transform::{DataTransform, IdentityTransform},
+    types::{FailedMessages, Message, MessageAcceptance, MessageId, RawMessage},
 };
-pub use self::topic::{Hasher, Topic, TopicHash};
-pub use self::transform::{DataTransform, IdentityTransform};
-pub use self::types::{FastMessageId, Message, MessageAcceptance, MessageId, RawMessage, Rpc};
 
-#[deprecated(
-    since = "0.44.0",
-    note = "Use `Behaviour` instead of `Gossipsub` for Network Behaviour, i.e. `libp2p::gossipsub::Behaviour"
-)]
-pub type Gossipsub = Behaviour;
-
-#[deprecated(
-    since = "0.44.0",
-    note = "Use re-exports that omit `Gossipsub` prefix, i.e. `libp2p::gossipsub::Event"
-)]
-pub type GossipsubEvent = Event;
-
-#[deprecated(
-    since = "0.44.0",
-    note = "Use re-exports that omit `Gossipsub` prefix, i.e. `libp2p::gossipsub::Config"
-)]
-pub type GossipsubConfig = Config;
-
-#[deprecated(
-    since = "0.44.0",
-    note = "Use re-exports that omit `Gossipsub` prefix, i.e. `libp2p::gossipsub::Message"
-)]
-pub type GossipsubMessage = Message;
-
-#[deprecated(
-    since = "0.44.0",
-    note = "Use re-exports that omit `Gossipsub` prefix, i.e. `libp2p::gossipsub::Rpc"
-)]
-pub type GossipsubRpc = Rpc;
-
-#[deprecated(
-    since = "0.44.0",
-    note = "Use re-exports that omit `Gossipsub` infix, i.e. `libp2p::gossipsub::RawMessage"
-)]
-pub type RawGossipsubMessage = RawMessage;
-
-#[deprecated(
-    since = "0.44.0",
-    note = "Use re-exports that omit `Gossipsub` prefix, i.e. `libp2p::gossipsub::ConfigBuilder"
-)]
-pub type GossipsubConfigBuilder = ConfigBuilder;
-
-#[deprecated(
-    since = "0.44.0",
-    note = "Use re-exports that omit `Gossipsub` prefix, i.e. `libp2p::gossipsub::Version"
-)]
-pub type GossipsubVersion = Version;
+#[deprecated(note = "Will be removed from the public API.")]
+pub type Rpc = self::types::Rpc;
 
 pub type IdentTopic = Topic<self::topic::IdentityHash>;
 pub type Sha256Topic = Topic<self::topic::Sha256Hash>;

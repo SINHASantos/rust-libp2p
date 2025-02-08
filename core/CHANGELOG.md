@@ -1,13 +1,119 @@
-# 0.39.0
+## 0.43.0
+
+- Added `libp2p::core::util::unreachable` that is a drop-in replacement of `void::unreachable`.
+  See [PR 5676](https://github.com/libp2p/rust-libp2p/pull/5676).
+
+## 0.42.0
+
+- Update `Transport::dial` function signature with a `DialOpts` param and remove `Transport::dial_as_listener`:
+  - `DialOpts` struct contains `PortUse` and `Endpoint`, 
+  - `PortUse` allows controlling port allocation of new connections (defaults to `PortUse::Reuse`)   - 
+  - Add `port_use` field to `ConnectedPoint`
+  - Set `endpoint` field in `DialOpts` to `Endpoint::Listener` to dial as a listener
+- Remove `Transport::address_translation` and relocate functionality to `libp2p_swarm`
+
+See [PR 4568].
+
+## 0.41.3
+- Use `web-time` instead of `instant`.
+  See [PR 5347](https://github.com/libp2p/rust-libp2p/pull/5347).
+
+## 0.41.2
+
+- Implement `std::fmt::Display` on `ListenerId`.
+  See [PR 4936](https://github.com/libp2p/rust-libp2p/pull/4936).
+
+## 0.41.1
+
+- Implement `{In,Out}boundConnectionUpgrade` for `SelectUpgrade`.
+  See [PR 4812](https://github.com/libp2p/rust-libp2p/pull/4812).
+
+## 0.41.0
+
+- Remove blanket-impl of `{In,Out}boundUpgrade` for `{In,Out}boundConnectionUpgrade`.
+  See [PR 4695](https://github.com/libp2p/rust-libp2p/pull/4695).
+- Remove deprecated functions from `ListenerId`.
+  See [PR 4736](https://github.com/libp2p/rust-libp2p/pull/4736).
+- Remove `upgrade::transfer` module.
+  See [issue 4011](https://github.com/libp2p/rust-libp2p/issues/4011) for details.
+  See [PR 4788](https://github.com/libp2p/rust-libp2p/pull/4788).
+
+## 0.40.1
+
+- Implement `Debug` for `StreamMuxerEvent`.
+  See [PR 4426].
+
+[PR 4426]: https://github.com/libp2p/rust-libp2p/pull/4426
+
+## 0.40.0
+
+- Allow `ListenerId` to be user-controlled, i.e. to be provided on `Transport::listen_on`.
+  See [PR 3567].
+
+- Raise MSRV to 1.65.
+  See [PR 3715].
+
+- Remove deprecated symbols related to upgrades.
+  See [PR 3867].
+
+- Enforce protocol names to be valid UTF8 strings as required by the [spec].
+  We delete the `ProtocolName` trait and replace it with a requirement for `AsRef<str>`.
+  See [PR 3746]
+
+- Remove `SingletonMuxer`.
+  See [PR 3883].
+
+- Add `global_only::Transport` that refuses to dial IP addresses from private ranges.
+  See [PR 3814].
+
+- Remove `upgrade::{apply, apply_inbound, apply_outbound, InboundUpgradeApply, OutboundUpgradeApply}` from public API.
+  These are implementation details that should not be depended on.
+  See [PR 3915].
+
+- Remove deprecated `identity` module.
+  Depend on `libp2p-identity` directly instead or import it via the `libp2p::identity` re-export.
+  See [PR 4040].
+
+[spec]: https://github.com/libp2p/specs/blob/master/connections/README.md#multistream-select
+[PR 3567]: https://github.com/libp2p/rust-libp2p/pull/3567
+[PR 3715]: https://github.com/libp2p/rust-libp2p/pull/3715
+[PR 3746]: https://github.com/libp2p/rust-libp2p/pull/3746
+[PR 3814]: https://github.com/libp2p/rust-libp2p/pull/3814
+[PR 3867]: https://github.com/libp2p/rust-libp2p/pull/3867
+[PR 3883]: https://github.com/libp2p/rust-libp2p/pull/3883
+[PR 3915]: https://github.com/libp2p/rust-libp2p/pull/3915
+[PR 4040]: https://github.com/libp2p/rust-libp2p/pull/4040
+
+## 0.39.2
+
+- Deprecate `upgrade::from_fn` without replacement as it is not used within `rust-libp2p`.
+  If you depend on it, we suggest you vendor it.
+  See [PR 3747].
+
+- Deprecate `{In,Out}boundUpgradeExt`, as they are not used in rust-libp2p.
+  See [PR 3807].
+
+- Deprecate `OptionalUpgrade` without replacement.
+  See [PR 3806].
+
+[PR 3747]: https://github.com/libp2p/rust-libp2p/pull/3747
+[PR 3807]: https://github.com/libp2p/rust-libp2p/pull/3807
+[PR 3806]: https://github.com/libp2p/rust-libp2p/pull/3806
+
+## 0.39.1
+
+- Migrate from `prost` to `quick-protobuf`. This removes `protoc` dependency. See [PR 3312].
+
+[PR 3221]: https://github.com/libp2p/rust-libp2p/pull/3221
+
+## 0.39.0
 
 - Move `ConnectionId` to `libp2p-swarm`. See [PR 3221].
 - Move `PendingPoint` to `libp2p-swarm` and make it crate-private. See [PR 3221].
-- Migrate from `prost` to `quick-protobuf`. This removes `protoc` dependency. See [PR 3312].
 
 [PR 3312]: https://github.com/libp2p/rust-libp2p/pull/3312
-[PR 3221]: https://github.com/libp2p/rust-libp2p/pull/3221
 
-# 0.38.0
+## 0.38.0
 
 - Remove deprecated functions `StreamMuxerExt::next_{inbound,outbound}`. See [PR 3031].
 
@@ -42,7 +148,7 @@
 [PR 3340]: https://github.com/libp2p/rust-libp2p/pull/3340
 [PR 3341]: https://github.com/libp2p/rust-libp2p/pull/3341
 
-# 0.37.0
+## 0.37.0
 
 - Implement `Hash` and `Ord` for `PublicKey`. See [PR 2915].
 
@@ -55,7 +161,7 @@
 [PR 2918]: https://github.com/libp2p/rust-libp2p/pull/2918
 [PR 3002]: https://github.com/libp2p/rust-libp2p/pull/3002
 
-# 0.36.0
+## 0.36.0
 
 - Make RSA keypair support optional. To enable RSA support, `rsa` feature should be enabled.
   See [PR 2860].
@@ -65,13 +171,13 @@
 [PR 2855]: https://github.com/libp2p/rust-libp2p/pull/2855
 [PR 2860]: https://github.com/libp2p/rust-libp2p/pull/2860/
 
-# 0.35.1
+## 0.35.1
 
 - Update to `p256` `v0.11.0`. See [PR 2636].
 
 [PR 2636]: https://github.com/libp2p/rust-libp2p/pull/2636/
 
-# 0.35.0
+## 0.35.0
 
 - Update prost requirement from 0.10 to 0.11 which no longer installs the protoc Protobuf compiler.
   Thus you will need protoc installed locally. See [PR 2788].
@@ -90,7 +196,7 @@
 [PR 2797]: https://github.com/libp2p/rust-libp2p/pull/2797
 [PR 2788]: https://github.com/libp2p/rust-libp2p/pull/2788
 
-# 0.34.0
+## 0.34.0
 
 - Remove `{read,write,flush,shutdown,destroy}_substream` functions from `StreamMuxer` trait
   in favor of forcing `StreamMuxer::Substream` to implement `AsyncRead + AsyncWrite`. See [PR 2707].
@@ -105,7 +211,7 @@
 [PR 2710]: https://github.com/libp2p/rust-libp2p/pull/2710
 [PR 2652]: https://github.com/libp2p/rust-libp2p/pull/2652
 
-# 0.33.0
+## 0.33.0
 
 - Have methods on `Transport` take `&mut self` instead of `self`. See [PR 2529].
 - Remove `StreamMuxer::flush_all`. See [PR 2669].
@@ -118,11 +224,11 @@
 [PR 2669]: https://github.com/libp2p/rust-libp2p/pull/2669
 
 
-# 0.32.1
+## 0.32.1
 
 - Add `PeerId::try_from_multiaddr` to extract a `PeerId` from a `Multiaddr` that ends in `/p2p/<peer-id>`.
 
-# 0.32.0 [2022-02-22]
+## 0.32.0 [2022-02-22]
 
 - Remove `Network`. `libp2p-core` is from now on an auxiliary crate only. Users
   that have previously used `Network` only, will need to use `Swarm` instead. See
@@ -151,7 +257,7 @@
 [PR 2463]: https://github.com/libp2p/rust-libp2p/pull/2463/
 [PR 2522]: https://github.com/libp2p/rust-libp2p/pull/2522
 
-# 0.31.0 [2022-01-27]
+## 0.31.0 [2022-01-27]
 
 - Update dependencies.
 
@@ -198,13 +304,13 @@
 [PR 2428]: https://github.com/libp2p/rust-libp2p/pull/2428
 [PR 2363]: https://github.com/libp2p/rust-libp2p/pull/2363
 
-# 0.30.1 [2021-11-16]
+## 0.30.1 [2021-11-16]
 
 - Use `instant` instead of `wasm-timer` (see [PR 2245]).
 
 [PR 2245]: https://github.com/libp2p/rust-libp2p/pull/2245
 
-# 0.30.0 [2021-11-01]
+## 0.30.0 [2021-11-01]
 
 - Add `ConnectionLimit::with_max_established` (see [PR 2137]).
 
@@ -218,9 +324,9 @@
 
 - Add `From<&PublicKey> for PeerId` (see [PR 2145]).
 
-- Remove `TInEvent` and `TOutEvent` trait paramters on most public types.
+- Remove `TInEvent` and `TOutEvent` trait parameters on most public types.
   `TInEvent` and `TOutEvent` are implied through `THandler` and thus
-  superflucious. Both are removed in favor of a derivation through `THandler`
+  superfluous. Both are removed in favor of a derivation through `THandler`
   (see [PR 2183]).
 
 - Require `ConnectionHandler::{InEvent,OutEvent,Error}` to implement `Debug`
@@ -266,7 +372,7 @@
 [RFC0002]: https://github.com/libp2p/specs/blob/master/RFC/0002-signed-envelopes.md
 [RFC0003]: https://github.com/libp2p/specs/blob/master/RFC/0003-routing-records.md
 
-# 0.29.0 [2021-07-12]
+## 0.29.0 [2021-07-12]
 
 - Switch from `parity-multiaddr` to upstream `multiaddr`.
 
@@ -282,19 +388,19 @@
 
 [PR 2090]: https://github.com/libp2p/rust-libp2p/pull/2090
 
-# 0.28.3 [2021-04-26]
+## 0.28.3 [2021-04-26]
 
 - Fix build with secp256k1 disabled [PR 2057](https://github.com/libp2p/rust-libp2p/pull/2057).
 
-# 0.28.2 [2021-04-13]
+## 0.28.2 [2021-04-13]
 
 - Update dependencies.
 
-# 0.28.1 [2021-03-17]
+## 0.28.1 [2021-03-17]
 
 - Update `paritytech-multiaddr` to `>=v0.11.2`.
 
-# 0.28.0 [2021-03-17]
+## 0.28.0 [2021-03-17]
 
 - `Network::dial()` understands `/p2p` addresses and `Transport::dial`
   gets a "fully qualified" `/p2p` address when dialing a specific peer,
@@ -306,11 +412,11 @@
 
 - Shorten and unify `Debug` impls of public keys.
 
-# 0.27.1 [2021-02-15]
+## 0.27.1 [2021-02-15]
 
 - Update dependencies.
 
-# 0.27.0 [2021-01-12]
+## 0.27.0 [2021-01-12]
 
 - (Re)add `Transport::address_translation` to permit transport-specific
   translations of observed addresses onto listening addresses.
@@ -318,20 +424,20 @@
 
 - Update dependencies.
 
-# 0.26.0 [2020-12-17]
+## 0.26.0 [2020-12-17]
 
 - Make `PeerId` be `Copy`, including small `PeerId` API changes.
   [PR 1874](https://github.com/libp2p/rust-libp2p/pull/1874/).
 
-# 0.25.2 [2020-12-02]
+## 0.25.2 [2020-12-02]
 
 - Require `multistream-select-0.9.1`.
 
-# 0.25.1 [2020-11-25]
+## 0.25.1 [2020-11-25]
 
 - Add missing multiaddr upgrade.
 
-# 0.25.0 [2020-11-25]
+## 0.25.0 [2020-11-25]
 
 - The `NetworkConfig` API is now a builder that moves `self`.
   [PR 1848](https://github.com/libp2p/rust-libp2p/pull/1848/).
@@ -339,24 +445,24 @@
 - New configurable connection limits for established connections and
   dedicated connection counters. Removed the connection limit dedicated
   to outgoing pending connection _per peer_. Connection limits are now
-  represented by `u32` intead of `usize` types.
+  represented by `u32` instead of `usize` types.
   [PR 1848](https://github.com/libp2p/rust-libp2p/pull/1848/).
 
 - Update `multihash`.
 
 - Update `multistream-select`.
 
-# 0.24.0 [2020-11-09]
+## 0.24.0 [2020-11-09]
 
 - Remove `ConnectionInfo` trait and replace it with `PeerId`
   everywhere. This was already effectively the case because
   `ConnectionInfo` was implemented on `PeerId`.
 
-# 0.23.1 [2020-10-20]
+## 0.23.1 [2020-10-20]
 
 - Update dependencies.
 
-# 0.23.0 [2020-10-16]
+## 0.23.0 [2020-10-16]
 
 - Rework transport boxing and move timeout configuration
   to the transport builder.
@@ -364,12 +470,12 @@
 
 - Update dependencies.
 
-# 0.22.1 [2020-09-10]
+## 0.22.1 [2020-09-10]
 
 - Require at least parity-multiaddr v0.9.2 in order to fulfill `Ord` bound on
   `Multiaddr`. [PR 1742](https://github.com/libp2p/rust-libp2p/pull/1742).
 
-# 0.22.0 [2020-09-09]
+## 0.22.0 [2020-09-09]
 
 - Simplify incoming connection handling. The `IncomingConnectionEvent`
   has been removed. Instead, pass the `IncomingConnection` obtained
@@ -396,7 +502,7 @@
   `MemoryTransport` `Listener` `ListenerEvent::Upgrade`
   [PR 1724](https://github.com/libp2p/rust-libp2p/pull/1724).
 
-# 0.21.0 [2020-08-18]
+## 0.21.0 [2020-08-18]
 
 - Remove duplicates when performing address translation
   [PR 1697](https://github.com/libp2p/rust-libp2p/pull/1697).
@@ -418,11 +524,11 @@
 - Add `ConnectedPoint::get_remote_address`
   ([PR 1649](https://github.com/libp2p/rust-libp2p/pull/1649)).
 
-# 0.20.1 [2020-07-17]
+## 0.20.1 [2020-07-17]
 
 - Update ed25519-dalek dependency.
 
-# 0.20.0 [2020-07-01]
+## 0.20.0 [2020-07-01]
 
 - Conditional compilation fixes for the `wasm32-wasi` target
   ([PR 1633](https://github.com/libp2p/rust-libp2p/pull/1633)).
@@ -434,7 +540,7 @@ a change in the address of the underlying connection.
 
 - Add `ConnectionHandler::inject_address_change`.
 
-# 0.19.2 [2020-06-22]
+## 0.19.2 [2020-06-22]
 
 - Add PartialOrd and Ord for PeerId
   ([PR 1594](https://github.com/libp2p/rust-libp2p/pull/1594)).

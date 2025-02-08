@@ -20,56 +20,56 @@
 
 #![cfg(test)]
 
-use super::*;
-
-use crate::kbucket::Distance;
-use crate::record::{store::MemoryStore, Key};
-use crate::K_VALUE;
 use futures::{executor::block_on, future::poll_fn, prelude::*};
 use futures_timer::Delay;
 use libp2p_core::{
-    connection::ConnectedPoint,
-    identity,
-    multiaddr::{multiaddr, Multiaddr, Protocol},
-    multihash::{Code, Multihash, MultihashDigest},
+    multiaddr::{multiaddr, Protocol},
+    multihash::Multihash,
     transport::MemoryTransport,
-    upgrade, Endpoint, PeerId, Transport,
+    upgrade, Transport,
 };
+use libp2p_identity as identity;
 use libp2p_noise as noise;
-use libp2p_swarm::{ConnectionId, Swarm, SwarmEvent};
+use libp2p_swarm::{self as swarm, Swarm, SwarmEvent};
 use libp2p_yamux as yamux;
 use quickcheck::*;
 use rand::{random, rngs::StdRng, thread_rng, Rng, SeedableRng};
-use std::{
-    collections::{HashMap, HashSet},
-    num::NonZeroUsize,
-    time::Duration,
-    u64,
+
+use super::*;
+use crate::{
+    record::{store::MemoryStore, Key},
+    K_VALUE, PROTOCOL_NAME, SHA_256_MH,
 };
 
-type TestSwarm = Swarm<Kademlia<MemoryStore>>;
+type TestSwarm = Swarm<Behaviour<MemoryStore>>;
 
 fn build_node() -> (Multiaddr, TestSwarm) {
     build_node_with_config(Default::default())
 }
 
-fn build_node_with_config(cfg: KademliaConfig) -> (Multiaddr, TestSwarm) {
+fn build_node_with_config(cfg: Config) -> (Multiaddr, TestSwarm) {
     let local_key = identity::Keypair::generate_ed25519();
     let local_public_key = local_key.public();
     let transport = MemoryTransport::default()
         .upgrade(upgrade::Version::V1)
-        .authenticate(noise::NoiseAuthenticated::xx(&local_key).unwrap())
-        .multiplex(yamux::YamuxConfig::default())
+        .authenticate(noise::Config::new(&local_key).unwrap())
+        .multiplex(yamux::Config::default())
         .boxed();
 
     let local_id = local_public_key.to_peer_id();
     let store = MemoryStore::new(local_id);
-    let behaviour = Kademlia::with_config(local_id, store, cfg);
+    let behaviour = Behaviour::with_config(local_id, store, cfg);
 
-    let mut swarm = Swarm::without_executor(transport, behaviour, local_id);
+    let mut swarm = Swarm::new(
+        transport,
+        behaviour,
+        local_id,
+        swarm::Config::with_async_std_executor(),
+    );
 
     let address: Multiaddr = Protocol::Memory(random::<u64>()).into();
     swarm.listen_on(address.clone()).unwrap();
+    swarm.add_external_address(address.clone());
 
     (address, swarm)
 }
@@ -80,7 +80,7 @@ fn build_nodes(num: usize) -> Vec<(Multiaddr, TestSwarm)> {
 }
 
 /// Builds swarms, each listening on a port. Does *not* connect the nodes together.
-fn build_nodes_with_config(num: usize, cfg: KademliaConfig) -> Vec<(Multiaddr, TestSwarm)> {
+fn build_nodes_with_config(num: usize, cfg: Config) -> Vec<(Multiaddr, TestSwarm)> {
     (0..num)
         .map(|_| build_node_with_config(cfg.clone()))
         .collect()
@@ -93,7 +93,7 @@ fn build_connected_nodes(total: usize, step: usize) -> Vec<(Multiaddr, TestSwarm
 fn build_connected_nodes_with_config(
     total: usize,
     step: usize,
-    cfg: KademliaConfig,
+    cfg: Config,
 ) -> Vec<(Multiaddr, TestSwarm)> {
     let mut swarms = build_nodes_with_config(total, cfg);
     let swarm_ids: Vec<_> = swarms
@@ -119,7 +119,7 @@ fn build_connected_nodes_with_config(
 
 fn build_fully_connected_nodes_with_config(
     total: usize,
-    cfg: KademliaConfig,
+    cfg: Config,
 ) -> Vec<(Multiaddr, TestSwarm)> {
     let mut swarms = build_nodes_with_config(total, cfg);
     let swarm_addr_and_peer_id: Vec<_> = swarms
@@ -136,8 +136,8 @@ fn build_fully_connected_nodes_with_config(
     swarms
 }
 
-fn random_multihash() -> Multihash {
-    Multihash::wrap(Code::Sha2_256.into(), &thread_rng().gen::<[u8; 32]>()).unwrap()
+fn random_multihash() -> Multihash<64> {
+    Multihash::wrap(SHA_256_MH, &thread_rng().gen::<[u8; 32]>()).unwrap()
 }
 
 #[derive(Clone, Debug)]
@@ -164,7 +164,11 @@ fn bootstrap() {
         // or smaller than K_VALUE.
         let num_group = rng.gen_range(1..(num_total % K_VALUE.get()) + 2);
 
-        let mut cfg = KademliaConfig::default();
+        let mut cfg = Config::new(PROTOCOL_NAME);
+        // Disabling periodic bootstrap and automatic bootstrap to prevent the bootstrap from
+        // triggering automatically.
+        cfg.set_periodic_bootstrap_interval(None);
+        cfg.set_automatic_bootstrap_throttle(None);
         if rng.gen() {
             cfg.disjoint_query_paths(true);
         }
@@ -188,7 +192,7 @@ fn bootstrap() {
                 loop {
                     match swarm.poll_next_unpin(ctx) {
                         Poll::Ready(Some(SwarmEvent::Behaviour(
-                            KademliaEvent::OutboundQueryProgressed {
+                            Event::OutboundQueryProgressed {
                                 id,
                                 result: QueryResult::Bootstrap(Ok(ok)),
                                 ..
@@ -243,7 +247,12 @@ fn query_iter() {
 
     fn run(rng: &mut impl Rng) {
         let num_total = rng.gen_range(2..20);
-        let mut swarms = build_connected_nodes(num_total, 1)
+        let mut config = Config::new(PROTOCOL_NAME);
+        // Disabling periodic bootstrap and automatic bootstrap to prevent the bootstrap from
+        // triggering automatically.
+        config.set_periodic_bootstrap_interval(None);
+        config.set_automatic_bootstrap_throttle(None);
+        let mut swarms = build_connected_nodes_with_config(num_total, 1, config)
             .into_iter()
             .map(|(_a, s)| s)
             .collect::<Vec<_>>();
@@ -257,7 +266,7 @@ fn query_iter() {
 
         match swarms[0].behaviour_mut().query(&qid) {
             Some(q) => match q.info() {
-                QueryInfo::GetClosestPeers { key, step } => {
+                QueryInfo::GetClosestPeers { key, step, .. } => {
                     assert_eq!(&key[..], search_target.to_bytes().as_slice());
                     assert_eq!(usize::from(step.count), 1);
                 }
@@ -278,7 +287,7 @@ fn query_iter() {
                 loop {
                     match swarm.poll_next_unpin(ctx) {
                         Poll::Ready(Some(SwarmEvent::Behaviour(
-                            KademliaEvent::OutboundQueryProgressed {
+                            Event::OutboundQueryProgressed {
                                 id,
                                 result: QueryResult::GetClosestPeers(Ok(ok)),
                                 ..
@@ -288,9 +297,11 @@ fn query_iter() {
                             assert_eq!(&ok.key[..], search_target.to_bytes().as_slice());
                             assert_eq!(swarm_ids[i], expected_swarm_id);
                             assert_eq!(swarm.behaviour_mut().queries.size(), 0);
-                            assert!(expected_peer_ids.iter().all(|p| ok.peers.contains(p)));
+                            let peer_ids =
+                                ok.peers.into_iter().map(|p| p.peer_id).collect::<Vec<_>>();
+                            assert!(expected_peer_ids.iter().all(|p| peer_ids.contains(p)));
                             let key = kbucket::Key::new(ok.key);
-                            assert_eq!(expected_distances, distances(&key, ok.peers));
+                            assert_eq!(expected_distances, distances(&key, peer_ids));
                             return Poll::Ready(());
                         }
                         // Ignore any other event.
@@ -312,7 +323,9 @@ fn query_iter() {
 
 #[test]
 fn unresponsive_not_returned_direct() {
-    let _ = env_logger::try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
     // Build one node. It contains fake addresses to non-existing nodes. We ask it to find a
     // random peer. We make sure that no fake address is returned.
 
@@ -336,12 +349,10 @@ fn unresponsive_not_returned_direct() {
         for swarm in &mut swarms {
             loop {
                 match swarm.poll_next_unpin(ctx) {
-                    Poll::Ready(Some(SwarmEvent::Behaviour(
-                        KademliaEvent::OutboundQueryProgressed {
-                            result: QueryResult::GetClosestPeers(Ok(ok)),
-                            ..
-                        },
-                    ))) => {
+                    Poll::Ready(Some(SwarmEvent::Behaviour(Event::OutboundQueryProgressed {
+                        result: QueryResult::GetClosestPeers(Ok(ok)),
+                        ..
+                    }))) => {
                         assert_eq!(&ok.key[..], search_target.to_bytes().as_slice());
                         assert_eq!(ok.peers.len(), 0);
                         return Poll::Ready(());
@@ -396,15 +407,75 @@ fn unresponsive_not_returned_indirect() {
         for swarm in &mut swarms {
             loop {
                 match swarm.poll_next_unpin(ctx) {
-                    Poll::Ready(Some(SwarmEvent::Behaviour(
-                        KademliaEvent::OutboundQueryProgressed {
-                            result: QueryResult::GetClosestPeers(Ok(ok)),
-                            ..
-                        },
-                    ))) => {
+                    Poll::Ready(Some(SwarmEvent::Behaviour(Event::OutboundQueryProgressed {
+                        result: QueryResult::GetClosestPeers(Ok(ok)),
+                        ..
+                    }))) => {
                         assert_eq!(&ok.key[..], search_target.to_bytes().as_slice());
                         assert_eq!(ok.peers.len(), 1);
-                        assert_eq!(ok.peers[0], first_peer_id);
+                        assert_eq!(ok.peers[0].peer_id, first_peer_id);
+                        return Poll::Ready(());
+                    }
+                    // Ignore any other event.
+                    Poll::Ready(Some(_)) => (),
+                    e @ Poll::Ready(_) => panic!("Unexpected return value: {e:?}"),
+                    Poll::Pending => break,
+                }
+            }
+        }
+
+        Poll::Pending
+    }))
+}
+
+// Test the result of get_closest_peers with different num_results
+// Note that the result is capped after exceeds K_VALUE
+#[test]
+fn get_closest_with_different_num_results() {
+    let k_value = K_VALUE.get();
+    for replication_factor in [5, k_value / 2, k_value] {
+        for num_results in k_value / 2..k_value * 2 {
+            get_closest_with_different_num_results_inner(num_results, replication_factor)
+        }
+    }
+}
+
+fn get_closest_with_different_num_results_inner(num_results: usize, replication_factor: usize) {
+    let k_value = K_VALUE.get();
+    let num_of_nodes = 3 * k_value;
+    let mut cfg = Config::new(PROTOCOL_NAME);
+    cfg.set_replication_factor(NonZeroUsize::new(replication_factor).unwrap());
+    let swarms = build_connected_nodes_with_config(num_of_nodes, replication_factor - 1, cfg);
+
+    let mut swarms = swarms
+        .into_iter()
+        .map(|(_addr, swarm)| swarm)
+        .collect::<Vec<_>>();
+
+    // Ask first to search a random value.
+    let search_target = PeerId::random();
+    let Some(num_results_nonzero) = std::num::NonZeroUsize::new(num_results) else {
+        panic!("Unexpected NonZeroUsize val of {num_results}");
+    };
+    swarms[0]
+        .behaviour_mut()
+        .get_n_closest_peers(search_target, num_results_nonzero);
+
+    block_on(poll_fn(move |ctx| {
+        for swarm in &mut swarms {
+            loop {
+                match swarm.poll_next_unpin(ctx) {
+                    Poll::Ready(Some(SwarmEvent::Behaviour(Event::OutboundQueryProgressed {
+                        result: QueryResult::GetClosestPeers(Ok(ok)),
+                        ..
+                    }))) => {
+                        assert_eq!(&ok.key[..], search_target.to_bytes().as_slice());
+                        if num_results > k_value {
+                            assert_eq!(ok.peers.len(), k_value, "Failed with replication_factor: {replication_factor}, num_results: {num_results}");
+                        } else {
+                            assert_eq!(ok.peers.len(), num_results, "Failed with replication_factor: {replication_factor}, num_results: {num_results}");
+                        }
+
                         return Poll::Ready(());
                     }
                     // Ignore any other event.
@@ -451,13 +522,11 @@ fn get_record_not_found() {
         for swarm in &mut swarms {
             loop {
                 match swarm.poll_next_unpin(ctx) {
-                    Poll::Ready(Some(SwarmEvent::Behaviour(
-                        KademliaEvent::OutboundQueryProgressed {
-                            id,
-                            result: QueryResult::GetRecord(Err(e)),
-                            ..
-                        },
-                    ))) => {
+                    Poll::Ready(Some(SwarmEvent::Behaviour(Event::OutboundQueryProgressed {
+                        id,
+                        result: QueryResult::GetRecord(Err(e)),
+                        ..
+                    }))) => {
                         assert_eq!(id, qid);
                         if let GetRecordError::NotFound { key, closest_peers } = e {
                             assert_eq!(key, target_key);
@@ -493,14 +562,18 @@ fn put_record() {
         // At least 4 nodes, 1 under test + 3 bootnodes.
         let num_total = usize::max(4, replication_factor.get() * 2);
 
-        let mut config = KademliaConfig::default();
+        let mut config = Config::new(PROTOCOL_NAME);
         config.set_replication_factor(replication_factor);
+        // Disabling periodic bootstrap and automatic bootstrap to prevent the bootstrap from
+        // triggering automatically.
+        config.set_periodic_bootstrap_interval(None);
+        config.set_automatic_bootstrap_throttle(None);
         if rng.gen() {
             config.disjoint_query_paths(true);
         }
 
         if filter_records {
-            config.set_record_filtering(KademliaStoreInserts::FilterBoth);
+            config.set_record_filtering(StoreInserts::FilterBoth);
         }
 
         let mut swarms = {
@@ -572,7 +645,7 @@ fn put_record() {
                 loop {
                     match swarm.poll_next_unpin(ctx) {
                         Poll::Ready(Some(SwarmEvent::Behaviour(
-                            KademliaEvent::OutboundQueryProgressed {
+                            Event::OutboundQueryProgressed {
                                 id,
                                 result: QueryResult::PutRecord(res),
                                 stats,
@@ -580,7 +653,7 @@ fn put_record() {
                             },
                         )))
                         | Poll::Ready(Some(SwarmEvent::Behaviour(
-                            KademliaEvent::OutboundQueryProgressed {
+                            Event::OutboundQueryProgressed {
                                 id,
                                 result: QueryResult::RepublishRecord(res),
                                 stats,
@@ -603,16 +676,14 @@ fn put_record() {
                                 }
                             }
                         }
-                        Poll::Ready(Some(SwarmEvent::Behaviour(
-                            KademliaEvent::InboundRequest {
-                                request: InboundRequest::PutRecord { record, .. },
-                            },
-                        ))) => {
+                        Poll::Ready(Some(SwarmEvent::Behaviour(Event::InboundRequest {
+                            request: InboundRequest::PutRecord { record, .. },
+                        }))) => {
                             if !drop_records {
                                 if let Some(record) = record {
                                     assert_eq!(
                                         swarm.behaviour().record_filtering,
-                                        KademliaStoreInserts::FilterBoth
+                                        StoreInserts::FilterBoth
                                     );
                                     // Accept the record
                                     swarm
@@ -623,7 +694,7 @@ fn put_record() {
                                 } else {
                                     assert_eq!(
                                         swarm.behaviour().record_filtering,
-                                        KademliaStoreInserts::Unfiltered
+                                        StoreInserts::Unfiltered
                                     );
                                 }
                             }
@@ -682,7 +753,7 @@ fn put_record() {
                     })
                     .collect::<HashSet<_>>();
 
-                if swarms[0].behaviour().record_filtering != KademliaStoreInserts::Unfiltered
+                if swarms[0].behaviour().record_filtering != StoreInserts::Unfiltered
                     && drop_records
                 {
                     assert_eq!(actual.len(), 0);
@@ -763,14 +834,12 @@ fn get_record() {
         for swarm in &mut swarms {
             loop {
                 match swarm.poll_next_unpin(ctx) {
-                    Poll::Ready(Some(SwarmEvent::Behaviour(
-                        KademliaEvent::OutboundQueryProgressed {
-                            id,
-                            result: QueryResult::GetRecord(Ok(r)),
-                            step: ProgressStep { count, last },
-                            ..
-                        },
-                    ))) => {
+                    Poll::Ready(Some(SwarmEvent::Behaviour(Event::OutboundQueryProgressed {
+                        id,
+                        result: QueryResult::GetRecord(Ok(r)),
+                        step: ProgressStep { count, last },
+                        ..
+                    }))) => {
                         assert_eq!(id, qid);
                         if usize::from(count) == 1 {
                             assert!(!last);
@@ -827,14 +896,12 @@ fn get_record_many() {
                     swarm.behaviour_mut().query_mut(&qid).unwrap().finish();
                 }
                 match swarm.poll_next_unpin(ctx) {
-                    Poll::Ready(Some(SwarmEvent::Behaviour(
-                        KademliaEvent::OutboundQueryProgressed {
-                            id,
-                            result: QueryResult::GetRecord(Ok(r)),
-                            step: ProgressStep { count: _, last },
-                            ..
-                        },
-                    ))) => {
+                    Poll::Ready(Some(SwarmEvent::Behaviour(Event::OutboundQueryProgressed {
+                        id,
+                        result: QueryResult::GetRecord(Ok(r)),
+                        step: ProgressStep { count: _, last },
+                        ..
+                    }))) => {
                         assert_eq!(id, qid);
                         if let GetRecordOk::FoundRecord(r) = r {
                             assert_eq!(r.record, record);
@@ -868,8 +935,12 @@ fn add_provider() {
         // At least 4 nodes, 1 under test + 3 bootnodes.
         let num_total = usize::max(4, replication_factor.get() * 2);
 
-        let mut config = KademliaConfig::default();
+        let mut config = Config::new(PROTOCOL_NAME);
         config.set_replication_factor(replication_factor);
+        // Disabling periodic bootstrap and automatic bootstrap to prevent the bootstrap from
+        // triggering automatically.
+        config.set_periodic_bootstrap_interval(None);
+        config.set_automatic_bootstrap_throttle(None);
         if rng.gen() {
             config.disjoint_query_paths(true);
         }
@@ -922,14 +993,14 @@ fn add_provider() {
                 loop {
                     match swarm.poll_next_unpin(ctx) {
                         Poll::Ready(Some(SwarmEvent::Behaviour(
-                            KademliaEvent::OutboundQueryProgressed {
+                            Event::OutboundQueryProgressed {
                                 id,
                                 result: QueryResult::StartProviding(res),
                                 ..
                             },
                         )))
                         | Poll::Ready(Some(SwarmEvent::Behaviour(
-                            KademliaEvent::OutboundQueryProgressed {
+                            Event::OutboundQueryProgressed {
                                 id,
                                 result: QueryResult::RepublishProvider(res),
                                 ..
@@ -1060,10 +1131,11 @@ fn exceed_jobs_max_queries() {
             loop {
                 if let Poll::Ready(Some(e)) = swarm.poll_next_unpin(ctx) {
                     match e {
-                        SwarmEvent::Behaviour(KademliaEvent::OutboundQueryProgressed {
+                        SwarmEvent::Behaviour(Event::OutboundQueryProgressed {
                             result: QueryResult::GetClosestPeers(Ok(r)),
                             ..
                         }) => break assert!(r.peers.is_empty()),
+                        SwarmEvent::Behaviour(Event::ModeChanged { .. }) => {}
                         SwarmEvent::Behaviour(e) => panic!("Unexpected event: {e:?}"),
                         _ => {}
                     }
@@ -1083,23 +1155,30 @@ fn exp_decr_expiration_overflow() {
     }
 
     // Right shifting a u64 by >63 results in a panic.
-    prop_no_panic(KademliaConfig::default().record_ttl.unwrap(), 64);
+    prop_no_panic(Config::new(PROTOCOL_NAME).record_ttl.unwrap(), 64);
 
     quickcheck(prop_no_panic as fn(_, _))
 }
 
 #[test]
 fn disjoint_query_does_not_finish_before_all_paths_did() {
-    let mut config = KademliaConfig::default();
+    let mut config = Config::new(PROTOCOL_NAME);
     config.disjoint_query_paths(true);
     // I.e. setting the amount disjoint paths to be explored to 2.
     config.set_parallelism(NonZeroUsize::new(2).unwrap());
+    // Disabling periodic bootstrap and automatic bootstrap to prevent the bootstrap from triggering
+    // automatically.
+    config.set_periodic_bootstrap_interval(None);
+    config.set_automatic_bootstrap_throttle(None);
 
     let mut alice = build_node_with_config(config);
     let mut trudy = build_node(); // Trudy the intrudor, an adversary.
     let mut bob = build_node();
 
-    let key = Key::from(Code::Sha2_256.digest(&thread_rng().gen::<[u8; 32]>()));
+    let key = Key::from(
+        Multihash::<64>::wrap(SHA_256_MH, &thread_rng().gen::<[u8; 32]>())
+            .expect("32 array to fit into 64 byte multihash"),
+    );
     let record_bob = Record::new(key.clone(), b"bob".to_vec());
     let record_trudy = Record::new(key.clone(), b"trudy".to_vec());
 
@@ -1135,13 +1214,11 @@ fn disjoint_query_does_not_finish_before_all_paths_did() {
         for (i, swarm) in [&mut alice, &mut trudy].iter_mut().enumerate() {
             loop {
                 match swarm.poll_next_unpin(ctx) {
-                    Poll::Ready(Some(SwarmEvent::Behaviour(
-                        KademliaEvent::OutboundQueryProgressed {
-                            result: QueryResult::GetRecord(result),
-                            step,
-                            ..
-                        },
-                    ))) => {
+                    Poll::Ready(Some(SwarmEvent::Behaviour(Event::OutboundQueryProgressed {
+                        result: QueryResult::GetRecord(result),
+                        step,
+                        ..
+                    }))) => {
                         if i != 0 {
                             panic!("Expected `QueryResult` from Alice.")
                         }
@@ -1178,7 +1255,7 @@ fn disjoint_query_does_not_finish_before_all_paths_did() {
         .behaviour()
         .queries
         .iter()
-        .for_each(|q| match &q.inner.info {
+        .for_each(|q| match &q.info {
             QueryInfo::GetRecord { step, .. } => {
                 assert_eq!(usize::from(step.count), 2);
             }
@@ -1192,13 +1269,11 @@ fn disjoint_query_does_not_finish_before_all_paths_did() {
         for (i, swarm) in [&mut alice, &mut bob].iter_mut().enumerate() {
             loop {
                 match swarm.poll_next_unpin(ctx) {
-                    Poll::Ready(Some(SwarmEvent::Behaviour(
-                        KademliaEvent::OutboundQueryProgressed {
-                            result: QueryResult::GetRecord(result),
-                            step,
-                            ..
-                        },
-                    ))) => {
+                    Poll::Ready(Some(SwarmEvent::Behaviour(Event::OutboundQueryProgressed {
+                        result: QueryResult::GetRecord(result),
+                        step,
+                        ..
+                    }))) => {
                         if i != 0 {
                             panic!("Expected `QueryResult` from Alice.")
                         }
@@ -1236,11 +1311,11 @@ fn disjoint_query_does_not_finish_before_all_paths_did() {
 }
 
 /// Tests that peers are not automatically inserted into
-/// the routing table with `KademliaBucketInserts::Manual`.
+/// the routing table with `BucketInserts::Manual`.
 #[test]
 fn manual_bucket_inserts() {
-    let mut cfg = KademliaConfig::default();
-    cfg.set_kbucket_inserts(KademliaBucketInserts::Manual);
+    let mut cfg = Config::new(PROTOCOL_NAME);
+    cfg.set_kbucket_inserts(BucketInserts::Manual);
     // 1 -> 2 -> [3 -> ...]
     let mut swarms = build_connected_nodes_with_config(3, 1, cfg);
     // The peers and their addresses for which we expect `RoutablePeer` events.
@@ -1249,7 +1324,7 @@ fn manual_bucket_inserts() {
         .skip(2)
         .map(|(a, s)| {
             let pid = *Swarm::local_peer_id(s);
-            let addr = a.clone().with(Protocol::P2p(pid.into()));
+            let addr = a.clone().with(Protocol::P2p(pid));
             (addr, pid)
         })
         .collect::<HashMap<_, _>>();
@@ -1266,7 +1341,7 @@ fn manual_bucket_inserts() {
         for (_, swarm) in swarms.iter_mut() {
             loop {
                 match swarm.poll_next_unpin(ctx) {
-                    Poll::Ready(Some(SwarmEvent::Behaviour(KademliaEvent::RoutablePeer {
+                    Poll::Ready(Some(SwarmEvent::Behaviour(Event::RoutablePeer {
                         peer,
                         address,
                     }))) => {
@@ -1294,19 +1369,19 @@ fn network_behaviour_on_address_change() {
     let local_peer_id = PeerId::random();
 
     let remote_peer_id = PeerId::random();
-    #[allow(deprecated)]
-    let connection_id = ConnectionId::DUMMY;
+    let connection_id = ConnectionId::new_unchecked(0);
     let old_address: Multiaddr = Protocol::Memory(1).into();
     let new_address: Multiaddr = Protocol::Memory(2).into();
 
-    let mut kademlia = Kademlia::new(local_peer_id, MemoryStore::new(local_peer_id));
+    let mut kademlia = Behaviour::new(local_peer_id, MemoryStore::new(local_peer_id));
 
     let endpoint = ConnectedPoint::Dialer {
         address: old_address.clone(),
         role_override: Endpoint::Dialer,
+        port_use: PortUse::Reuse,
     };
 
-    // Mimick a connection being established.
+    // Mimic a connection being established.
     kademlia.on_swarm_event(FromSwarm::ConnectionEstablished(ConnectionEstablished {
         peer_id: remote_peer_id,
         connection_id,
@@ -1328,12 +1403,12 @@ fn network_behaviour_on_address_change() {
         .unwrap()
         .is_empty());
 
-    // Mimick the connection handler confirming the protocol for
+    // Mimic the connection handler confirming the protocol for
     // the test connection, so that the peer is added to the routing table.
     kademlia.on_connection_handler_event(
         remote_peer_id,
         connection_id,
-        KademliaHandlerEvent::ProtocolConfirmed { endpoint },
+        HandlerEvent::ProtocolConfirmed { endpoint },
     );
 
     assert_eq!(
@@ -1354,10 +1429,12 @@ fn network_behaviour_on_address_change() {
         old: &ConnectedPoint::Dialer {
             address: old_address,
             role_override: Endpoint::Dialer,
+            port_use: PortUse::Reuse,
         },
         new: &ConnectedPoint::Dialer {
             address: new_address.clone(),
             role_override: Endpoint::Dialer,
+            port_use: PortUse::Reuse,
         },
     }));
 
@@ -1385,10 +1462,11 @@ fn get_providers_single() {
 
         block_on(async {
             match single_swarm.next().await.unwrap() {
-                SwarmEvent::Behaviour(KademliaEvent::OutboundQueryProgressed {
+                SwarmEvent::Behaviour(Event::OutboundQueryProgressed {
                     result: QueryResult::StartProviding(Ok(_)),
                     ..
                 }) => {}
+                SwarmEvent::Behaviour(Event::ModeChanged { .. }) => {}
                 SwarmEvent::Behaviour(e) => panic!("Unexpected event: {e:?}"),
                 _ => {}
             }
@@ -1399,7 +1477,7 @@ fn get_providers_single() {
         block_on(async {
             loop {
                 match single_swarm.next().await.unwrap() {
-                    SwarmEvent::Behaviour(KademliaEvent::OutboundQueryProgressed {
+                    SwarmEvent::Behaviour(Event::OutboundQueryProgressed {
                         id,
                         result: QueryResult::GetProviders(Ok(ok)),
                         step: index,
@@ -1465,7 +1543,7 @@ fn get_providers_limit<const N: usize>() {
                 loop {
                     match swarm.poll_next_unpin(ctx) {
                         Poll::Ready(Some(SwarmEvent::Behaviour(
-                            KademliaEvent::OutboundQueryProgressed {
+                            Event::OutboundQueryProgressed {
                                 id,
                                 result: QueryResult::GetProviders(Ok(ok)),
                                 step: index,

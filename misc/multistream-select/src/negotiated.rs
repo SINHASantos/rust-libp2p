@@ -18,7 +18,12 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::protocol::{HeaderLine, Message, MessageReader, Protocol, ProtocolError};
+use std::{
+    error::Error,
+    fmt, io, mem,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use futures::{
     io::{IoSlice, IoSliceMut},
@@ -26,12 +31,8 @@ use futures::{
     ready,
 };
 use pin_project::pin_project;
-use std::{
-    error::Error,
-    fmt, io, mem,
-    pin::Pin,
-    task::{Context, Poll},
-};
+
+use crate::protocol::{HeaderLine, Message, MessageReader, Protocol, ProtocolError};
 
 /// An I/O stream that has settled on an (application-layer) protocol to use.
 ///
@@ -59,8 +60,10 @@ pub struct NegotiatedComplete<TInner> {
 
 impl<TInner> Future for NegotiatedComplete<TInner>
 where
-    // `Unpin` is required not because of implementation details but because we produce the
-    // `Negotiated` as the output of the future.
+    // `Unpin` is required not because of
+    // implementation details but because we produce
+    // the `Negotiated` as the output of the
+    // future.
     TInner: AsyncRead + AsyncWrite + Unpin,
 {
     type Output = Result<Negotiated<TInner>, NegotiationError>;
@@ -171,7 +174,7 @@ impl<TInner> Negotiated<TInner> {
 
                     if let Message::Protocol(p) = &msg {
                         if p.as_ref() == protocol.as_ref() {
-                            log::debug!("Negotiated: Received confirmation for protocol: {}", p);
+                            tracing::debug!(protocol=%p, "Negotiated: Received confirmation for protocol");
                             *this.state = State::Completed {
                                 io: io.into_inner(),
                             };
@@ -250,13 +253,13 @@ where
     }
 
     // TODO: implement once method is stabilized in the futures crate
-    /*unsafe fn initializer(&self) -> Initializer {
-        match &self.state {
-            State::Completed { io, .. } => io.initializer(),
-            State::Expecting { io, .. } => io.inner_ref().initializer(),
-            State::Invalid => panic!("Negotiated: Invalid state"),
-        }
-    }*/
+    // unsafe fn initializer(&self) -> Initializer {
+    // match &self.state {
+    // State::Completed { io, .. } => io.initializer(),
+    // State::Expecting { io, .. } => io.inner_ref().initializer(),
+    // State::Invalid => panic!("Negotiated: Invalid state"),
+    // }
+    // }
 
     fn poll_read_vectored(
         mut self: Pin<&mut Self>,
@@ -305,9 +308,7 @@ where
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
-        // Ensure all data has been flushed and expected negotiation messages
-        // have been received.
-        ready!(self.as_mut().poll(cx).map_err(Into::<io::Error>::into)?);
+        // Ensure all data has been flushed, including optimistic multistream-select messages.
         ready!(self
             .as_mut()
             .poll_flush(cx)
@@ -316,7 +317,13 @@ where
         // Continue with the shutdown of the underlying I/O stream.
         match self.project().state.project() {
             StateProj::Completed { io, .. } => io.poll_close(cx),
-            StateProj::Expecting { io, .. } => io.poll_close(cx),
+            StateProj::Expecting { io, .. } => {
+                let close_poll = io.poll_close(cx);
+                if let Poll::Ready(Ok(())) = close_poll {
+                    tracing::debug!("Stream closed. Confirmation from remote for optimstic protocol negotiation still pending")
+                }
+                close_poll
+            }
             StateProj::Invalid => panic!("Negotiated: Invalid state"),
         }
     }

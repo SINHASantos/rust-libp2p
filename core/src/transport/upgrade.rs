@@ -20,29 +20,31 @@
 
 //! Configuration of transport protocol upgrades.
 
-pub use crate::upgrade::Version;
-
-use crate::{
-    connection::ConnectedPoint,
-    muxing::{StreamMuxer, StreamMuxerBox},
-    transport::{
-        and_then::AndThen, boxed::boxed, timeout::TransportTimeout, ListenerId, Transport,
-        TransportError, TransportEvent,
-    },
-    upgrade::{
-        self, apply_inbound, apply_outbound, InboundUpgrade, InboundUpgradeApply, OutboundUpgrade,
-        OutboundUpgradeApply, UpgradeError,
-    },
-    Negotiated, PeerId,
-};
-use futures::{prelude::*, ready};
-use multiaddr::Multiaddr;
 use std::{
     error::Error,
     fmt,
     pin::Pin,
     task::{Context, Poll},
     time::Duration,
+};
+
+use futures::{prelude::*, ready};
+use libp2p_identity::PeerId;
+use multiaddr::Multiaddr;
+
+pub use crate::upgrade::Version;
+use crate::{
+    connection::ConnectedPoint,
+    muxing::{StreamMuxer, StreamMuxerBox},
+    transport::{
+        and_then::AndThen, boxed::boxed, timeout::TransportTimeout, DialOpts, ListenerId,
+        Transport, TransportError, TransportEvent,
+    },
+    upgrade::{
+        self, apply_inbound, apply_outbound, InboundConnectionUpgrade, InboundUpgradeApply,
+        OutboundConnectionUpgrade, OutboundUpgradeApply, UpgradeError,
+    },
+    Negotiated,
 };
 
 /// A `Builder` facilitates upgrading of a [`Transport`] for use with
@@ -57,13 +59,13 @@ use std::{
 /// It thus enforces the following invariants on every transport
 /// obtained from [`multiplex`](Authenticated::multiplex):
 ///
-///   1. The transport must be [authenticated](Builder::authenticate)
-///      and [multiplexed](Authenticated::multiplex).
+///   1. The transport must be [authenticated](Builder::authenticate) and
+///      [multiplexed](Authenticated::multiplex).
 ///   2. Authentication must precede the negotiation of a multiplexer.
 ///   3. Applying a multiplexer is the last step in the upgrade process.
-///   4. The [`Transport::Output`] conforms to the requirements of a `Swarm`,
-///      namely a tuple of a [`PeerId`] (from the authentication upgrade) and a
-///      [`StreamMuxer`] (from the multiplexing upgrade).
+///   4. The [`Transport::Output`] conforms to the requirements of a `Swarm`, namely a tuple of a
+///      [`PeerId`] (from the authentication upgrade) and a [`StreamMuxer`] (from the multiplexing
+///      upgrade).
 #[derive(Clone)]
 pub struct Builder<T> {
     inner: T,
@@ -100,8 +102,8 @@ where
         T: Transport<Output = C>,
         C: AsyncRead + AsyncWrite + Unpin,
         D: AsyncRead + AsyncWrite + Unpin,
-        U: InboundUpgrade<Negotiated<C>, Output = (PeerId, D), Error = E>,
-        U: OutboundUpgrade<Negotiated<C>, Output = (PeerId, D), Error = E> + Clone,
+        U: InboundConnectionUpgrade<Negotiated<C>, Output = (PeerId, D), Error = E>,
+        U: OutboundConnectionUpgrade<Negotiated<C>, Output = (PeerId, D), Error = E> + Clone,
         E: Error + 'static,
     {
         let version = self.version;
@@ -122,7 +124,7 @@ where
 pub struct Authenticate<C, U>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: InboundUpgrade<Negotiated<C>> + OutboundUpgrade<Negotiated<C>>,
+    U: InboundConnectionUpgrade<Negotiated<C>> + OutboundConnectionUpgrade<Negotiated<C>>,
 {
     #[pin]
     inner: EitherUpgrade<C, U>,
@@ -131,11 +133,11 @@ where
 impl<C, U> Future for Authenticate<C, U>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: InboundUpgrade<Negotiated<C>>
-        + OutboundUpgrade<
+    U: InboundConnectionUpgrade<Negotiated<C>>
+        + OutboundConnectionUpgrade<
             Negotiated<C>,
-            Output = <U as InboundUpgrade<Negotiated<C>>>::Output,
-            Error = <U as InboundUpgrade<Negotiated<C>>>::Error,
+            Output = <U as InboundConnectionUpgrade<Negotiated<C>>>::Output,
+            Error = <U as InboundConnectionUpgrade<Negotiated<C>>>::Error,
         >,
 {
     type Output = <EitherUpgrade<C, U> as Future>::Output;
@@ -154,7 +156,7 @@ where
 pub struct Multiplex<C, U>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: InboundUpgrade<Negotiated<C>> + OutboundUpgrade<Negotiated<C>>,
+    U: InboundConnectionUpgrade<Negotiated<C>> + OutboundConnectionUpgrade<Negotiated<C>>,
 {
     peer_id: Option<PeerId>,
     #[pin]
@@ -164,8 +166,8 @@ where
 impl<C, U, M, E> Future for Multiplex<C, U>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: InboundUpgrade<Negotiated<C>, Output = M, Error = E>,
-    U: OutboundUpgrade<Negotiated<C>, Output = M, Error = E>,
+    U: InboundConnectionUpgrade<Negotiated<C>, Output = M, Error = E>,
+    U: OutboundConnectionUpgrade<Negotiated<C>, Output = M, Error = E>,
 {
     type Output = Result<(PeerId, M), UpgradeError<E>>;
 
@@ -183,7 +185,7 @@ where
     }
 }
 
-/// An transport with peer authentication, obtained from [`Builder::authenticate`].
+/// A transport with peer authentication, obtained from [`Builder::authenticate`].
 #[derive(Clone)]
 pub struct Authenticated<T>(Builder<T>);
 
@@ -207,8 +209,8 @@ where
         T: Transport<Output = (PeerId, C)>,
         C: AsyncRead + AsyncWrite + Unpin,
         D: AsyncRead + AsyncWrite + Unpin,
-        U: InboundUpgrade<Negotiated<C>, Output = D, Error = E>,
-        U: OutboundUpgrade<Negotiated<C>, Output = D, Error = E> + Clone,
+        U: InboundConnectionUpgrade<Negotiated<C>, Output = D, Error = E>,
+        U: OutboundConnectionUpgrade<Negotiated<C>, Output = D, Error = E> + Clone,
         E: Error + 'static,
     {
         Authenticated(Builder::new(
@@ -235,8 +237,8 @@ where
         T: Transport<Output = (PeerId, C)>,
         C: AsyncRead + AsyncWrite + Unpin,
         M: StreamMuxer,
-        U: InboundUpgrade<Negotiated<C>, Output = M, Error = E>,
-        U: OutboundUpgrade<Negotiated<C>, Output = M, Error = E> + Clone,
+        U: InboundConnectionUpgrade<Negotiated<C>, Output = M, Error = E>,
+        U: OutboundConnectionUpgrade<Negotiated<C>, Output = M, Error = E> + Clone,
         E: Error + 'static,
     {
         let version = self.0.version;
@@ -268,8 +270,8 @@ where
         T: Transport<Output = (PeerId, C)>,
         C: AsyncRead + AsyncWrite + Unpin,
         M: StreamMuxer,
-        U: InboundUpgrade<Negotiated<C>, Output = M, Error = E>,
-        U: OutboundUpgrade<Negotiated<C>, Output = M, Error = E> + Clone,
+        U: InboundConnectionUpgrade<Negotiated<C>, Output = M, Error = E>,
+        U: OutboundConnectionUpgrade<Negotiated<C>, Output = M, Error = E> + Clone,
         E: Error + 'static,
         F: for<'a> FnOnce(&'a PeerId, &'a ConnectedPoint) -> U + Clone,
     {
@@ -334,27 +336,24 @@ where
     type ListenerUpgrade = T::ListenerUpgrade;
     type Dial = T::Dial;
 
-    fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
-        self.0.dial(addr)
+    fn dial(
+        &mut self,
+        addr: Multiaddr,
+        opts: DialOpts,
+    ) -> Result<Self::Dial, TransportError<Self::Error>> {
+        self.0.dial(addr, opts)
     }
 
     fn remove_listener(&mut self, id: ListenerId) -> bool {
         self.0.remove_listener(id)
     }
 
-    fn dial_as_listener(
+    fn listen_on(
         &mut self,
+        id: ListenerId,
         addr: Multiaddr,
-    ) -> Result<Self::Dial, TransportError<Self::Error>> {
-        self.0.dial_as_listener(addr)
-    }
-
-    fn listen_on(&mut self, addr: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
-        self.0.listen_on(addr)
-    }
-
-    fn address_translation(&self, server: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
-        self.0.address_translation(server, observed)
+    ) -> Result<(), TransportError<Self::Error>> {
+        self.0.listen_on(id, addr)
     }
 
     fn poll(
@@ -390,8 +389,8 @@ where
     T: Transport<Output = (PeerId, C)>,
     T::Error: 'static,
     C: AsyncRead + AsyncWrite + Unpin,
-    U: InboundUpgrade<Negotiated<C>, Output = D, Error = E>,
-    U: OutboundUpgrade<Negotiated<C>, Output = D, Error = E> + Clone,
+    U: InboundConnectionUpgrade<Negotiated<C>, Output = D, Error = E>,
+    U: OutboundConnectionUpgrade<Negotiated<C>, Output = D, Error = E> + Clone,
     E: Error + 'static,
 {
     type Output = (PeerId, D);
@@ -399,10 +398,14 @@ where
     type ListenerUpgrade = ListenerUpgradeFuture<T::ListenerUpgrade, U, C>;
     type Dial = DialUpgradeFuture<T::Dial, U, C>;
 
-    fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
+    fn dial(
+        &mut self,
+        addr: Multiaddr,
+        opts: DialOpts,
+    ) -> Result<Self::Dial, TransportError<Self::Error>> {
         let future = self
             .inner
-            .dial(addr)
+            .dial(addr, opts)
             .map_err(|err| err.map(TransportUpgradeError::Transport))?;
         Ok(DialUpgradeFuture {
             future: Box::pin(future),
@@ -414,28 +417,14 @@ where
         self.inner.remove_listener(id)
     }
 
-    fn dial_as_listener(
+    fn listen_on(
         &mut self,
+        id: ListenerId,
         addr: Multiaddr,
-    ) -> Result<Self::Dial, TransportError<Self::Error>> {
-        let future = self
-            .inner
-            .dial_as_listener(addr)
-            .map_err(|err| err.map(TransportUpgradeError::Transport))?;
-        Ok(DialUpgradeFuture {
-            future: Box::pin(future),
-            upgrade: future::Either::Left(Some(self.upgrade.clone())),
-        })
-    }
-
-    fn listen_on(&mut self, addr: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
+    ) -> Result<(), TransportError<Self::Error>> {
         self.inner
-            .listen_on(addr)
+            .listen_on(id, addr)
             .map_err(|err| err.map(TransportUpgradeError::Transport))
-    }
-
-    fn address_translation(&self, server: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
-        self.inner.address_translation(server, observed)
     }
 
     fn poll(
@@ -493,7 +482,7 @@ where
 /// The [`Transport::Dial`] future of an [`Upgrade`]d transport.
 pub struct DialUpgradeFuture<F, U, C>
 where
-    U: OutboundUpgrade<Negotiated<C>>,
+    U: OutboundConnectionUpgrade<Negotiated<C>>,
     C: AsyncRead + AsyncWrite + Unpin,
 {
     future: Pin<Box<F>>,
@@ -504,14 +493,14 @@ impl<F, U, C, D> Future for DialUpgradeFuture<F, U, C>
 where
     F: TryFuture<Ok = (PeerId, C)>,
     C: AsyncRead + AsyncWrite + Unpin,
-    U: OutboundUpgrade<Negotiated<C>, Output = D>,
+    U: OutboundConnectionUpgrade<Negotiated<C>, Output = D>,
     U::Error: Error,
 {
     type Output = Result<(PeerId, D), TransportUpgradeError<F::Error, U::Error>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // We use a `this` variable because the compiler can't mutably borrow multiple times
-        // accross a `Deref`.
+        // across a `Deref`.
         let this = &mut *self;
 
         loop {
@@ -544,7 +533,7 @@ where
 
 impl<F, U, C> Unpin for DialUpgradeFuture<F, U, C>
 where
-    U: OutboundUpgrade<Negotiated<C>>,
+    U: OutboundConnectionUpgrade<Negotiated<C>>,
     C: AsyncRead + AsyncWrite + Unpin,
 {
 }
@@ -553,7 +542,7 @@ where
 pub struct ListenerUpgradeFuture<F, U, C>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: InboundUpgrade<Negotiated<C>>,
+    U: InboundConnectionUpgrade<Negotiated<C>>,
 {
     future: Pin<Box<F>>,
     upgrade: future::Either<Option<U>, (PeerId, InboundUpgradeApply<C, U>)>,
@@ -563,14 +552,14 @@ impl<F, U, C, D> Future for ListenerUpgradeFuture<F, U, C>
 where
     F: TryFuture<Ok = (PeerId, C)>,
     C: AsyncRead + AsyncWrite + Unpin,
-    U: InboundUpgrade<Negotiated<C>, Output = D>,
+    U: InboundConnectionUpgrade<Negotiated<C>, Output = D>,
     U::Error: Error,
 {
     type Output = Result<(PeerId, D), TransportUpgradeError<F::Error, U::Error>>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         // We use a `this` variable because the compiler can't mutably borrow multiple times
-        // accross a `Deref`.
+        // across a `Deref`.
         let this = &mut *self;
 
         loop {
@@ -604,6 +593,6 @@ where
 impl<F, U, C> Unpin for ListenerUpgradeFuture<F, U, C>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: InboundUpgrade<Negotiated<C>>,
+    U: InboundConnectionUpgrade<Negotiated<C>>,
 {
 }

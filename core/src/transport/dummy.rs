@@ -18,10 +18,17 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::transport::{ListenerId, Transport, TransportError, TransportEvent};
-use crate::Multiaddr;
-use futures::{prelude::*, task::Context, task::Poll};
 use std::{fmt, io, marker::PhantomData, pin::Pin};
+
+use futures::{
+    prelude::*,
+    task::{Context, Poll},
+};
+
+use crate::{
+    transport::{DialOpts, ListenerId, Transport, TransportError, TransportEvent},
+    Multiaddr,
+};
 
 /// Implementation of `Transport` that doesn't support any multiaddr.
 ///
@@ -59,7 +66,11 @@ impl<TOut> Transport for DummyTransport<TOut> {
     type ListenerUpgrade = futures::future::Pending<Result<Self::Output, io::Error>>;
     type Dial = futures::future::Pending<Result<Self::Output, io::Error>>;
 
-    fn listen_on(&mut self, addr: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
+    fn listen_on(
+        &mut self,
+        _id: ListenerId,
+        addr: Multiaddr,
+    ) -> Result<(), TransportError<Self::Error>> {
         Err(TransportError::MultiaddrNotSupported(addr))
     }
 
@@ -67,19 +78,12 @@ impl<TOut> Transport for DummyTransport<TOut> {
         false
     }
 
-    fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
-        Err(TransportError::MultiaddrNotSupported(addr))
-    }
-
-    fn dial_as_listener(
+    fn dial(
         &mut self,
         addr: Multiaddr,
+        _opts: DialOpts,
     ) -> Result<Self::Dial, TransportError<Self::Error>> {
         Err(TransportError::MultiaddrNotSupported(addr))
-    }
-
-    fn address_translation(&self, _server: &Multiaddr, _observed: &Multiaddr) -> Option<Multiaddr> {
-        None
     }
 
     fn poll(
@@ -90,7 +94,7 @@ impl<TOut> Transport for DummyTransport<TOut> {
     }
 }
 
-/// Implementation of `AsyncRead` and `AsyncWrite`. Not meant to be instanciated.
+/// Implementation of `AsyncRead` and `AsyncWrite`. Not meant to be instantiated.
 pub struct DummyStream(());
 
 impl fmt::Debug for DummyStream {

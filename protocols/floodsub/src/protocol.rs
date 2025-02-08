@@ -18,20 +18,23 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::proto;
-use crate::topic::Topic;
+use std::{io, iter, pin::Pin};
+
 use asynchronous_codec::Framed;
+use bytes::Bytes;
 use futures::{
     io::{AsyncRead, AsyncWrite},
-    Future,
+    Future, SinkExt, StreamExt,
 };
-use futures::{SinkExt, StreamExt};
-use libp2p_core::{InboundUpgrade, OutboundUpgrade, PeerId, UpgradeInfo};
-use std::{io, iter, pin::Pin};
+use libp2p_core::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
+use libp2p_identity::PeerId;
+use libp2p_swarm::StreamProtocol;
+
+use crate::{proto, topic::Topic};
 
 const MAX_MESSAGE_LEN_BYTES: usize = 2048;
 
-const PROTOCOL_NAME: &[u8] = b"/floodsub/1.0.0";
+const PROTOCOL_NAME: StreamProtocol = StreamProtocol::new("/floodsub/1.0.0");
 
 /// Implementation of `ConnectionUpgrade` for the floodsub protocol.
 #[derive(Debug, Clone, Default)]
@@ -45,7 +48,7 @@ impl FloodsubProtocol {
 }
 
 impl UpgradeInfo for FloodsubProtocol {
-    type Info = &'static [u8];
+    type Info = StreamProtocol;
     type InfoIter = iter::Once<Self::Info>;
 
     fn protocol_info(&self) -> Self::InfoIter {
@@ -79,7 +82,7 @@ where
                 messages.push(FloodsubMessage {
                     source: PeerId::from_bytes(&publish.from.unwrap_or_default())
                         .map_err(|_| FloodsubError::InvalidPeerId)?,
-                    data: publish.data.unwrap_or_default(),
+                    data: publish.data.unwrap_or_default().into(),
                     sequence_number: publish.seqno.unwrap_or_default(),
                     topics: publish.topic_ids.into_iter().map(Topic::new).collect(),
                 });
@@ -132,7 +135,7 @@ pub struct FloodsubRpc {
 }
 
 impl UpgradeInfo for FloodsubRpc {
-    type Info = &'static [u8];
+    type Info = StreamProtocol;
     type InfoIter = iter::Once<Self::Info>;
 
     fn protocol_info(&self) -> Self::InfoIter {
@@ -170,7 +173,7 @@ impl FloodsubRpc {
                 .into_iter()
                 .map(|msg| proto::Message {
                     from: Some(msg.source.to_bytes()),
-                    data: Some(msg.data),
+                    data: Some(msg.data.to_vec()),
                     seqno: Some(msg.sequence_number),
                     topic_ids: msg.topics.into_iter().map(|topic| topic.into()).collect(),
                 })
@@ -195,7 +198,7 @@ pub struct FloodsubMessage {
     pub source: PeerId,
 
     /// Content of the message. Its meaning is out of scope of this library.
-    pub data: Vec<u8>,
+    pub data: Bytes,
 
     /// An incrementing sequence number.
     pub sequence_number: Vec<u8>,

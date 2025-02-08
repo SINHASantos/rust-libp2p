@@ -23,15 +23,21 @@
 
 use std::collections::HashMap;
 
-use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue};
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::{Family, MetricConstructor};
-use prometheus_client::metrics::gauge::Gauge;
-use prometheus_client::metrics::histogram::{linear_buckets, Histogram};
-use prometheus_client::registry::Registry;
+use prometheus_client::{
+    encoding::{EncodeLabelSet, EncodeLabelValue},
+    metrics::{
+        counter::Counter,
+        family::{Family, MetricConstructor},
+        gauge::Gauge,
+        histogram::{linear_buckets, Histogram},
+    },
+    registry::Registry,
+};
 
-use crate::topic::TopicHash;
-use crate::types::{MessageAcceptance, PeerKind};
+use crate::{
+    topic::TopicHash,
+    types::{MessageAcceptance, PeerKind},
+};
 
 // Default value that limits for how many topics do we store metrics.
 const DEFAULT_MAX_TOPICS: usize = 300;
@@ -99,8 +105,8 @@ impl Default for Config {
 type EverSubscribed = bool;
 
 /// A collection of metrics used throughout the Gossipsub behaviour.
-pub struct Metrics {
-    /* Configuration parameters */
+pub(crate) struct Metrics {
+    // Configuration parameters
     /// Maximum number of topics for which we store metrics. This helps keep the metrics bounded.
     max_topics: usize,
     /// Maximum number of topics for which we store metrics, where the topic in not one to which we
@@ -108,11 +114,11 @@ pub struct Metrics {
     /// from received messages and not explicit application subscriptions.
     max_never_subscribed_topics: usize,
 
-    /* Auxiliary variables */
+    // Auxiliary variables
     /// Information needed to decide if a topic is allowed or not.
     topic_info: HashMap<TopicHash, EverSubscribed>,
 
-    /* Metrics per known topic */
+    // Metrics per known topic
     /// Status of our subscription to this topic. This metric allows analyzing other topic metrics
     /// filtered by our current subscription status.
     topic_subscription_status: Family<TopicHash, Gauge>,
@@ -127,8 +133,14 @@ pub struct Metrics {
     ignored_messages: Family<TopicHash, Counter>,
     /// The number of messages rejected by the application (validation result).
     rejected_messages: Family<TopicHash, Counter>,
+    /// The number of publish messages dropped by the sender.
+    publish_messages_dropped: Family<TopicHash, Counter>,
+    /// The number of forward messages dropped by the sender.
+    forward_messages_dropped: Family<TopicHash, Counter>,
+    /// The number of messages that timed out and could not be sent.
+    timedout_messages_dropped: Family<TopicHash, Counter>,
 
-    /* Metrics regarding mesh state */
+    // Metrics regarding mesh state
     /// Number of peers in our mesh. This metric should be updated with the count of peers for a
     /// topic in the mesh regardless of inclusion and churn events.
     mesh_peer_counts: Family<TopicHash, Gauge>,
@@ -137,7 +149,7 @@ pub struct Metrics {
     /// Number of times we remove peers in a topic mesh for different reasons.
     mesh_peer_churn_events: Family<ChurnLabel, Counter>,
 
-    /* Metrics regarding messages sent/received */
+    // Metrics regarding messages sent/received
     /// Number of gossip messages sent to each topic.
     topic_msg_sent_counts: Family<TopicHash, Counter>,
     /// Bytes from gossip messages sent to each topic.
@@ -152,13 +164,13 @@ pub struct Metrics {
     /// Bytes received from gossip messages for each topic.
     topic_msg_recv_bytes: Family<TopicHash, Counter>,
 
-    /* Metrics related to scoring */
+    // Metrics related to scoring
     /// Histogram of the scores for each mesh topic.
     score_per_mesh: Family<TopicHash, Histogram, HistBuilder>,
     /// A counter of the kind of penalties being applied to peers.
     scoring_penalties: Family<PenaltyLabel, Counter>,
 
-    /* General Metrics */
+    // General Metrics
     /// Gossipsub supports floodsub, gossipsub v1.0 and gossipsub v1.1. Peers are classified based
     /// on which protocol they support. This metric keeps track of the number of peers that are
     /// connected of each type.
@@ -166,7 +178,7 @@ pub struct Metrics {
     /// The time it takes to complete one iteration of the heartbeat.
     heartbeat_duration: Histogram,
 
-    /* Performance metrics */
+    // Performance metrics
     /// When the user validates a message, it tries to re propagate it to its mesh peers. If the
     /// message expires from the memcache before it can be validated, we count this a cache miss
     /// and it is an indicator that the memcache size should be increased.
@@ -174,10 +186,21 @@ pub struct Metrics {
     /// The number of times we have decided that an IWANT control message is required for this
     /// topic. A very high metric might indicate an underperforming network.
     topic_iwant_msgs: Family<TopicHash, Counter>,
+
+    /// The number of times we have received an IDONTWANT control message.
+    idontwant_msgs: Counter,
+
+    /// The number of msg_id's we have received in every IDONTWANT control message.
+    idontwant_msgs_ids: Counter,
+
+    /// The size of the priority queue.
+    priority_queue_size: Histogram,
+    /// The size of the non-priority queue.
+    non_priority_queue_size: Histogram,
 }
 
 impl Metrics {
-    pub fn new(registry: &mut Registry, config: Config) -> Self {
+    pub(crate) fn new(registry: &mut Registry, config: Config) -> Self {
         // Destructure the config to be sure everything is used.
         let Config {
             max_topics,
@@ -220,6 +243,21 @@ impl Metrics {
         let rejected_messages = register_family!(
             "rejected_messages_per_topic",
             "Number of rejected messages received for each topic"
+        );
+
+        let publish_messages_dropped = register_family!(
+            "publish_messages_dropped_per_topic",
+            "Number of publish messages dropped per topic"
+        );
+
+        let forward_messages_dropped = register_family!(
+            "forward_messages_dropped_per_topic",
+            "Number of forward messages dropped per topic"
+        );
+
+        let timedout_messages_dropped = register_family!(
+            "timedout_messages_dropped_per_topic",
+            "Number of timedout messages dropped per topic"
         );
 
         let mesh_peer_counts = register_family!(
@@ -292,6 +330,27 @@ impl Metrics {
             "topic_iwant_msgs",
             "Number of times we have decided an IWANT is required for this topic"
         );
+
+        let idontwant_msgs = {
+            let metric = Counter::default();
+            registry.register(
+                "idontwant_msgs",
+                "The number of times we have received an IDONTWANT control message",
+                metric.clone(),
+            );
+            metric
+        };
+
+        let idontwant_msgs_ids = {
+            let metric = Counter::default();
+            registry.register(
+                "idontwant_msgs_ids",
+                "The number of msg_id's we have received in every total of all IDONTWANT control message.",
+                metric.clone(),
+            );
+            metric
+        };
+
         let memcache_misses = {
             let metric = Counter::default();
             registry.register(
@@ -301,6 +360,20 @@ impl Metrics {
             );
             metric
         };
+
+        let priority_queue_size = Histogram::new(linear_buckets(0.0, 25.0, 100));
+        registry.register(
+            "priority_queue_size",
+            "Histogram of observed priority queue sizes",
+            priority_queue_size.clone(),
+        );
+
+        let non_priority_queue_size = Histogram::new(linear_buckets(0.0, 25.0, 100));
+        registry.register(
+            "non_priority_queue_size",
+            "Histogram of observed non-priority queue sizes",
+            non_priority_queue_size.clone(),
+        );
 
         Self {
             max_topics,
@@ -312,6 +385,9 @@ impl Metrics {
             accepted_messages,
             ignored_messages,
             rejected_messages,
+            publish_messages_dropped,
+            forward_messages_dropped,
+            timedout_messages_dropped,
             mesh_peer_counts,
             mesh_peer_inclusion_events,
             mesh_peer_churn_events,
@@ -327,6 +403,10 @@ impl Metrics {
             heartbeat_duration,
             memcache_misses,
             topic_iwant_msgs,
+            idontwant_msgs,
+            idontwant_msgs_ids,
+            priority_queue_size,
+            non_priority_queue_size,
         }
     }
 
@@ -355,20 +435,25 @@ impl Metrics {
         }
     }
 
-    /// Register how many peers do we known are subscribed to this topic.
-    pub fn set_topic_peers(&mut self, topic: &TopicHash, count: usize) {
+    /// Increase the number of peers that are subscribed to this topic.
+    pub(crate) fn inc_topic_peers(&mut self, topic: &TopicHash) {
         if self.register_topic(topic).is_ok() {
-            self.topic_peers_count
-                .get_or_create(topic)
-                .set(count as i64);
+            self.topic_peers_count.get_or_create(topic).inc();
         }
     }
 
-    /* Mesh related methods */
+    /// Decrease the number of peers that are subscribed to this topic.
+    pub(crate) fn dec_topic_peers(&mut self, topic: &TopicHash) {
+        if self.register_topic(topic).is_ok() {
+            self.topic_peers_count.get_or_create(topic).dec();
+        }
+    }
+
+    // Mesh related methods
 
     /// Registers the subscription to a topic if the configured limits allow it.
     /// Sets the registered number of peers in the mesh to 0.
-    pub fn joined(&mut self, topic: &TopicHash) {
+    pub(crate) fn joined(&mut self, topic: &TopicHash) {
         if self.topic_info.contains_key(topic) || self.topic_info.len() < self.max_topics {
             self.topic_info.insert(topic.clone(), true);
             let was_subscribed = self.topic_subscription_status.get_or_create(topic).set(1);
@@ -379,7 +464,7 @@ impl Metrics {
 
     /// Registers the unsubscription to a topic if the topic was previously allowed.
     /// Sets the registered number of peers in the mesh to 0.
-    pub fn left(&mut self, topic: &TopicHash) {
+    pub(crate) fn left(&mut self, topic: &TopicHash) {
         if self.topic_info.contains_key(topic) {
             // Depending on the configured topic bounds we could miss a mesh topic.
             // So, check first if the topic was previously allowed.
@@ -390,7 +475,7 @@ impl Metrics {
     }
 
     /// Register the inclusion of peers in our mesh due to some reason.
-    pub fn peers_included(&mut self, topic: &TopicHash, reason: Inclusion, count: usize) {
+    pub(crate) fn peers_included(&mut self, topic: &TopicHash, reason: Inclusion, count: usize) {
         if self.register_topic(topic).is_ok() {
             self.mesh_peer_inclusion_events
                 .get_or_create(&InclusionLabel {
@@ -402,7 +487,7 @@ impl Metrics {
     }
 
     /// Register the removal of peers in our mesh due to some reason.
-    pub fn peers_removed(&mut self, topic: &TopicHash, reason: Churn, count: usize) {
+    pub(crate) fn peers_removed(&mut self, topic: &TopicHash, reason: Churn, count: usize) {
         if self.register_topic(topic).is_ok() {
             self.mesh_peer_churn_events
                 .get_or_create(&ChurnLabel {
@@ -414,7 +499,7 @@ impl Metrics {
     }
 
     /// Register the current number of peers in our mesh for this topic.
-    pub fn set_mesh_peers(&mut self, topic: &TopicHash, count: usize) {
+    pub(crate) fn set_mesh_peers(&mut self, topic: &TopicHash, count: usize) {
         if self.register_topic(topic).is_ok() {
             // Due to limits, this topic could have not been allowed, so we check.
             self.mesh_peer_counts.get_or_create(topic).set(count as i64);
@@ -422,28 +507,28 @@ impl Metrics {
     }
 
     /// Register that an invalid message was received on a specific topic.
-    pub fn register_invalid_message(&mut self, topic: &TopicHash) {
+    pub(crate) fn register_invalid_message(&mut self, topic: &TopicHash) {
         if self.register_topic(topic).is_ok() {
             self.invalid_messages.get_or_create(topic).inc();
         }
     }
 
     /// Register a score penalty.
-    pub fn register_score_penalty(&mut self, penalty: Penalty) {
+    pub(crate) fn register_score_penalty(&mut self, penalty: Penalty) {
         self.scoring_penalties
             .get_or_create(&PenaltyLabel { penalty })
             .inc();
     }
 
     /// Registers that a message was published on a specific topic.
-    pub fn register_published_message(&mut self, topic: &TopicHash) {
+    pub(crate) fn register_published_message(&mut self, topic: &TopicHash) {
         if self.register_topic(topic).is_ok() {
             self.topic_msg_published.get_or_create(topic).inc();
         }
     }
 
     /// Register sending a message over a topic.
-    pub fn msg_sent(&mut self, topic: &TopicHash, bytes: usize) {
+    pub(crate) fn msg_sent(&mut self, topic: &TopicHash, bytes: usize) {
         if self.register_topic(topic).is_ok() {
             self.topic_msg_sent_counts.get_or_create(topic).inc();
             self.topic_msg_sent_bytes
@@ -452,15 +537,36 @@ impl Metrics {
         }
     }
 
+    /// Register dropping a Publish message over a topic.
+    pub(crate) fn publish_msg_dropped(&mut self, topic: &TopicHash) {
+        if self.register_topic(topic).is_ok() {
+            self.publish_messages_dropped.get_or_create(topic).inc();
+        }
+    }
+
+    /// Register dropping a Forward message over a topic.
+    pub(crate) fn forward_msg_dropped(&mut self, topic: &TopicHash) {
+        if self.register_topic(topic).is_ok() {
+            self.forward_messages_dropped.get_or_create(topic).inc();
+        }
+    }
+
+    /// Register dropping a message that timedout over a topic.
+    pub(crate) fn timeout_msg_dropped(&mut self, topic: &TopicHash) {
+        if self.register_topic(topic).is_ok() {
+            self.timedout_messages_dropped.get_or_create(topic).inc();
+        }
+    }
+
     /// Register that a message was received (and was not a duplicate).
-    pub fn msg_recvd(&mut self, topic: &TopicHash) {
+    pub(crate) fn msg_recvd(&mut self, topic: &TopicHash) {
         if self.register_topic(topic).is_ok() {
             self.topic_msg_recv_counts.get_or_create(topic).inc();
         }
     }
 
     /// Register that a message was received (could have been a duplicate).
-    pub fn msg_recvd_unfiltered(&mut self, topic: &TopicHash, bytes: usize) {
+    pub(crate) fn msg_recvd_unfiltered(&mut self, topic: &TopicHash, bytes: usize) {
         if self.register_topic(topic).is_ok() {
             self.topic_msg_recv_counts_unfiltered
                 .get_or_create(topic)
@@ -471,7 +577,11 @@ impl Metrics {
         }
     }
 
-    pub fn register_msg_validation(&mut self, topic: &TopicHash, validation: &MessageAcceptance) {
+    pub(crate) fn register_msg_validation(
+        &mut self,
+        topic: &TopicHash,
+        validation: &MessageAcceptance,
+    ) {
         if self.register_topic(topic).is_ok() {
             match validation {
                 MessageAcceptance::Accept => self.accepted_messages.get_or_create(topic).inc(),
@@ -482,38 +592,54 @@ impl Metrics {
     }
 
     /// Register a memcache miss.
-    pub fn memcache_miss(&mut self) {
+    pub(crate) fn memcache_miss(&mut self) {
         self.memcache_misses.inc();
     }
 
     /// Register sending an IWANT msg for this topic.
-    pub fn register_iwant(&mut self, topic: &TopicHash) {
+    pub(crate) fn register_iwant(&mut self, topic: &TopicHash) {
         if self.register_topic(topic).is_ok() {
             self.topic_iwant_msgs.get_or_create(topic).inc();
         }
     }
 
+    /// Register receiving an IDONTWANT msg for this topic.
+    pub(crate) fn register_idontwant(&mut self, msgs: usize) {
+        self.idontwant_msgs.inc();
+        self.idontwant_msgs_ids.inc_by(msgs as u64);
+    }
+
     /// Observes a heartbeat duration.
-    pub fn observe_heartbeat_duration(&mut self, millis: u64) {
+    pub(crate) fn observe_heartbeat_duration(&mut self, millis: u64) {
         self.heartbeat_duration.observe(millis as f64);
     }
 
+    /// Observes a priority queue size.
+    pub(crate) fn observe_priority_queue_size(&mut self, len: usize) {
+        self.priority_queue_size.observe(len as f64);
+    }
+
+    /// Observes a non-priority queue size.
+    pub(crate) fn observe_non_priority_queue_size(&mut self, len: usize) {
+        self.non_priority_queue_size.observe(len as f64);
+    }
+
     /// Observe a score of a mesh peer.
-    pub fn observe_mesh_peers_score(&mut self, topic: &TopicHash, score: f64) {
+    pub(crate) fn observe_mesh_peers_score(&mut self, topic: &TopicHash, score: f64) {
         if self.register_topic(topic).is_ok() {
             self.score_per_mesh.get_or_create(topic).observe(score);
         }
     }
 
     /// Register a new peers connection based on its protocol.
-    pub fn peer_protocol_connected(&mut self, kind: PeerKind) {
+    pub(crate) fn peer_protocol_connected(&mut self, kind: PeerKind) {
         self.peers_per_protocol
             .get_or_create(&ProtocolLabel { protocol: kind })
             .inc();
     }
 
     /// Removes a peer from the counter based on its protocol when it disconnects.
-    pub fn peer_protocol_disconnected(&mut self, kind: PeerKind) {
+    pub(crate) fn peer_protocol_disconnected(&mut self, kind: PeerKind) {
         let metric = self
             .peers_per_protocol
             .get_or_create(&ProtocolLabel { protocol: kind });
@@ -526,7 +652,7 @@ impl Metrics {
 
 /// Reasons why a peer was included in the mesh.
 #[derive(PartialEq, Eq, Hash, EncodeLabelValue, Clone, Debug)]
-pub enum Inclusion {
+pub(crate) enum Inclusion {
     /// Peer was a fanaout peer.
     Fanout,
     /// Included from random selection.
@@ -539,7 +665,7 @@ pub enum Inclusion {
 
 /// Reasons why a peer was removed from the mesh.
 #[derive(PartialEq, Eq, Hash, EncodeLabelValue, Clone, Debug)]
-pub enum Churn {
+pub(crate) enum Churn {
     /// Peer disconnected.
     Dc,
     /// Peer had a bad score.
@@ -554,7 +680,7 @@ pub enum Churn {
 
 /// Kinds of reasons a peer's score has been penalized
 #[derive(PartialEq, Eq, Hash, EncodeLabelValue, Clone, Debug)]
-pub enum Penalty {
+pub(crate) enum Penalty {
     /// A peer grafted before waiting the back-off time.
     GraftBackoff,
     /// A Peer did not respond to an IWANT request in time.

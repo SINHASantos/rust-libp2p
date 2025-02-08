@@ -18,12 +18,18 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::handler::{
-    ConnectionEvent, ConnectionHandler, ConnectionHandlerEvent, KeepAlive, SubstreamProtocol,
+use std::{
+    fmt::Debug,
+    marker::PhantomData,
+    task::{Context, Poll},
 };
-use std::{fmt::Debug, marker::PhantomData, task::Context, task::Poll};
+
+use crate::handler::{
+    ConnectionEvent, ConnectionHandler, ConnectionHandlerEvent, SubstreamProtocol,
+};
 
 /// Wrapper around a protocol handler that turns the input event into something else.
+#[derive(Debug)]
 pub struct MapInEvent<TConnectionHandler, TNewIn, TMap> {
     inner: TConnectionHandler,
     map: TMap,
@@ -41,17 +47,17 @@ impl<TConnectionHandler, TMap, TNewIn> MapInEvent<TConnectionHandler, TNewIn, TM
     }
 }
 
+#[expect(deprecated)] // TODO: Remove when {In, Out}boundOpenInfo is fully removed.
 impl<TConnectionHandler, TMap, TNewIn> ConnectionHandler
     for MapInEvent<TConnectionHandler, TNewIn, TMap>
 where
     TConnectionHandler: ConnectionHandler,
-    TMap: Fn(TNewIn) -> Option<TConnectionHandler::InEvent>,
+    TMap: Fn(TNewIn) -> Option<TConnectionHandler::FromBehaviour>,
     TNewIn: Debug + Send + 'static,
     TMap: Send + 'static,
 {
-    type InEvent = TNewIn;
-    type OutEvent = TConnectionHandler::OutEvent;
-    type Error = TConnectionHandler::Error;
+    type FromBehaviour = TNewIn;
+    type ToBehaviour = TConnectionHandler::ToBehaviour;
     type InboundProtocol = TConnectionHandler::InboundProtocol;
     type OutboundProtocol = TConnectionHandler::OutboundProtocol;
     type InboundOpenInfo = TConnectionHandler::InboundOpenInfo;
@@ -67,7 +73,7 @@ where
         }
     }
 
-    fn connection_keep_alive(&self) -> KeepAlive {
+    fn connection_keep_alive(&self) -> bool {
         self.inner.connection_keep_alive()
     }
 
@@ -75,14 +81,13 @@ where
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<
-        ConnectionHandlerEvent<
-            Self::OutboundProtocol,
-            Self::OutboundOpenInfo,
-            Self::OutEvent,
-            Self::Error,
-        >,
+        ConnectionHandlerEvent<Self::OutboundProtocol, Self::OutboundOpenInfo, Self::ToBehaviour>,
     > {
         self.inner.poll(cx)
+    }
+
+    fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<Option<Self::ToBehaviour>> {
+        self.inner.poll_close(cx)
     }
 
     fn on_connection_event(

@@ -25,19 +25,21 @@
 //! `Stream` and `Sink` implementations of `MessageIO` and
 //! `MessageReader`.
 
-use crate::length_delimited::{LengthDelimited, LengthDelimitedReader};
-use crate::Version;
-
-use bytes::{BufMut, Bytes, BytesMut};
-use futures::{io::IoSlice, prelude::*, ready};
 use std::{
-    convert::TryFrom,
     error::Error,
     fmt, io,
     pin::Pin,
     task::{Context, Poll},
 };
+
+use bytes::{BufMut, Bytes, BytesMut};
+use futures::{io::IoSlice, prelude::*, ready};
 use unsigned_varint as uvi;
+
+use crate::{
+    length_delimited::{LengthDelimited, LengthDelimitedReader},
+    Version,
+};
 
 /// The maximum number of supported protocols that can be processed.
 const MAX_PROTOCOLS: usize = 1000;
@@ -49,11 +51,11 @@ const MSG_PROTOCOL_NA: &[u8] = b"na\n";
 /// The encoded form of a multistream-select 'ls' message.
 const MSG_LS: &[u8] = b"ls\n";
 
-/// The multistream-select header lines preceeding negotiation.
+/// The multistream-select header lines preceding negotiation.
 ///
 /// Every [`Version`] has a corresponding header line.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum HeaderLine {
+pub(crate) enum HeaderLine {
     /// The `/multistream/1.0.0` header line.
     V1,
 }
@@ -68,10 +70,9 @@ impl From<Version> for HeaderLine {
 
 /// A protocol (name) exchanged during protocol negotiation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Protocol(Bytes);
-
-impl AsRef<[u8]> for Protocol {
-    fn as_ref(&self) -> &[u8] {
+pub(crate) struct Protocol(String);
+impl AsRef<str> for Protocol {
+    fn as_ref(&self) -> &str {
         self.0.as_ref()
     }
 }
@@ -83,7 +84,10 @@ impl TryFrom<Bytes> for Protocol {
         if !value.as_ref().starts_with(b"/") {
             return Err(ProtocolError::InvalidProtocol);
         }
-        Ok(Protocol(value))
+        let protocol_as_string =
+            String::from_utf8(value.to_vec()).map_err(|_| ProtocolError::InvalidProtocol)?;
+
+        Ok(Protocol(protocol_as_string))
     }
 }
 
@@ -95,18 +99,30 @@ impl TryFrom<&[u8]> for Protocol {
     }
 }
 
+impl TryFrom<&str> for Protocol {
+    type Error = ProtocolError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        if !value.starts_with('/') {
+            return Err(ProtocolError::InvalidProtocol);
+        }
+
+        Ok(Protocol(value.to_owned()))
+    }
+}
+
 impl fmt::Display for Protocol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", String::from_utf8_lossy(&self.0))
+        write!(f, "{}", self.0)
     }
 }
 
 /// A multistream-select protocol message.
 ///
 /// Multistream-select protocol messages are exchanged with the goal
-/// of agreeing on a application-layer protocol to use on an I/O stream.
+/// of agreeing on an application-layer protocol to use on an I/O stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Message {
+pub(crate) enum Message {
     /// A header message identifies the multistream-select protocol
     /// that the sender wishes to speak.
     Header(HeaderLine),
@@ -123,48 +139,43 @@ pub enum Message {
 
 impl Message {
     /// Encodes a `Message` into its byte representation.
-    pub fn encode(&self, dest: &mut BytesMut) -> Result<(), ProtocolError> {
+    fn encode(&self, dest: &mut BytesMut) {
         match self {
             Message::Header(HeaderLine::V1) => {
                 dest.reserve(MSG_MULTISTREAM_1_0.len());
                 dest.put(MSG_MULTISTREAM_1_0);
-                Ok(())
             }
             Message::Protocol(p) => {
-                let len = p.0.as_ref().len() + 1; // + 1 for \n
+                let len = p.as_ref().len() + 1; // + 1 for \n
                 dest.reserve(len);
                 dest.put(p.0.as_ref());
                 dest.put_u8(b'\n');
-                Ok(())
             }
             Message::ListProtocols => {
                 dest.reserve(MSG_LS.len());
                 dest.put(MSG_LS);
-                Ok(())
             }
             Message::Protocols(ps) => {
                 let mut buf = uvi::encode::usize_buffer();
                 let mut encoded = Vec::with_capacity(ps.len());
                 for p in ps {
-                    encoded.extend(uvi::encode::usize(p.0.as_ref().len() + 1, &mut buf)); // +1 for '\n'
+                    encoded.extend(uvi::encode::usize(p.as_ref().len() + 1, &mut buf)); // +1 for '\n'
                     encoded.extend_from_slice(p.0.as_ref());
                     encoded.push(b'\n')
                 }
                 encoded.push(b'\n');
                 dest.reserve(encoded.len());
                 dest.put(encoded.as_ref());
-                Ok(())
             }
             Message::NotAvailable => {
                 dest.reserve(MSG_PROTOCOL_NA.len());
                 dest.put(MSG_PROTOCOL_NA);
-                Ok(())
             }
         }
     }
 
     /// Decodes a `Message` from its byte representation.
-    pub fn decode(mut msg: Bytes) -> Result<Message, ProtocolError> {
+    fn decode(mut msg: Bytes) -> Result<Message, ProtocolError> {
         if msg == MSG_MULTISTREAM_1_0 {
             return Ok(Message::Header(HeaderLine::V1));
         }
@@ -220,14 +231,14 @@ impl Message {
 
 /// A `MessageIO` implements a [`Stream`] and [`Sink`] of [`Message`]s.
 #[pin_project::pin_project]
-pub struct MessageIO<R> {
+pub(crate) struct MessageIO<R> {
     #[pin]
     inner: LengthDelimited<R>,
 }
 
 impl<R> MessageIO<R> {
     /// Constructs a new `MessageIO` resource wrapping the given I/O stream.
-    pub fn new(inner: R) -> MessageIO<R>
+    pub(crate) fn new(inner: R) -> MessageIO<R>
     where
         R: AsyncRead + AsyncWrite,
     {
@@ -243,7 +254,7 @@ impl<R> MessageIO<R> {
     /// This is typically done if further negotiation messages are expected to be
     /// received but no more messages are written, allowing the writing of
     /// follow-up protocol data to commence.
-    pub fn into_reader(self) -> MessageReader<R> {
+    pub(crate) fn into_reader(self) -> MessageReader<R> {
         MessageReader {
             inner: self.inner.into_reader(),
         }
@@ -258,7 +269,7 @@ impl<R> MessageIO<R> {
     /// has not yet been flushed. The read buffer is guaranteed to be empty whenever
     /// `MessageIO::poll` returned a message. The write buffer is guaranteed to be empty
     /// when the sink has been flushed.
-    pub fn into_inner(self) -> R {
+    pub(crate) fn into_inner(self) -> R {
         self.inner.into_inner()
     }
 }
@@ -275,7 +286,7 @@ where
 
     fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
         let mut buf = BytesMut::new();
-        item.encode(&mut buf)?;
+        item.encode(&mut buf);
         self.project()
             .inner
             .start_send(buf.freeze())
@@ -311,7 +322,7 @@ where
 /// I/O resource combined with direct `AsyncWrite` access.
 #[pin_project::pin_project]
 #[derive(Debug)]
-pub struct MessageReader<R> {
+pub(crate) struct MessageReader<R> {
     #[pin]
     inner: LengthDelimitedReader<R>,
 }
@@ -328,7 +339,7 @@ impl<R> MessageReader<R> {
     /// outgoing frame has not yet been flushed. The read buffer is guaranteed to
     /// be empty whenever `MessageReader::poll` returned a message. The write
     /// buffer is guaranteed to be empty whenever the sink has been flushed.
-    pub fn into_inner(self) -> R {
+    pub(crate) fn into_inner(self) -> R {
         self.inner.into_inner()
     }
 }
@@ -389,7 +400,7 @@ where
         return Poll::Ready(None);
     };
 
-    log::trace!("Received message: {:?}", msg);
+    tracing::trace!(message=?msg, "Received message");
 
     Poll::Ready(Some(Ok(msg)))
 }
@@ -453,9 +464,11 @@ impl fmt::Display for ProtocolError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use quickcheck::*;
     use std::iter;
+
+    use quickcheck::*;
+
+    use super::*;
 
     impl Arbitrary for Protocol {
         fn arbitrary(g: &mut Gen) -> Protocol {
@@ -465,7 +478,7 @@ mod tests {
                 .filter(|&c| c.is_ascii_alphanumeric())
                 .take(n)
                 .collect();
-            Protocol(Bytes::from(format!("/{p}")))
+            Protocol(format!("/{p}"))
         }
     }
 
@@ -486,8 +499,7 @@ mod tests {
     fn encode_decode_message() {
         fn prop(msg: Message) {
             let mut buf = BytesMut::new();
-            msg.encode(&mut buf)
-                .unwrap_or_else(|_| panic!("Encoding message failed: {msg:?}"));
+            msg.encode(&mut buf);
             match Message::decode(buf.freeze()) {
                 Ok(m) => assert_eq!(m, msg),
                 Err(e) => panic!("Decoding failed: {e:?}"),

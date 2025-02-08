@@ -20,19 +20,21 @@
 
 use std::{
     io::Error,
-    marker::Unpin,
     net::{SocketAddr, UdpSocket},
     task::{Context, Poll},
 };
 
-/// Interface that must be implemented by the different runtimes to use the [`UdpSocket`] in async mode
+/// Interface that must be implemented by the different runtimes to use the [`UdpSocket`] in async
+/// mode
+#[allow(unreachable_pub)] // Users should not depend on this.
 pub trait AsyncSocket: Unpin + Send + 'static {
     /// Create the async socket from the [`std::net::UdpSocket`]
     fn from_std(socket: UdpSocket) -> std::io::Result<Self>
     where
         Self: Sized;
 
-    /// Attempts to receive a single packet on the socket from the remote address to which it is connected.
+    /// Attempts to receive a single packet on the socket
+    /// from the remote address to which it is connected.
     fn poll_read(
         &mut self,
         _cx: &mut Context,
@@ -49,14 +51,14 @@ pub trait AsyncSocket: Unpin + Send + 'static {
 }
 
 #[cfg(feature = "async-io")]
-pub mod asio {
-    use super::*;
+pub(crate) mod asio {
     use async_io::Async;
     use futures::FutureExt;
 
-    /// AsyncIo UdpSocket
-    pub type AsyncUdpSocket = Async<UdpSocket>;
+    use super::*;
 
+    /// AsyncIo UdpSocket
+    pub(crate) type AsyncUdpSocket = Async<UdpSocket>;
     impl AsyncSocket for AsyncUdpSocket {
         fn from_std(socket: UdpSocket) -> std::io::Result<Self> {
             Async::new(socket)
@@ -92,13 +94,13 @@ pub mod asio {
 }
 
 #[cfg(feature = "tokio")]
-pub mod tokio {
-    use super::*;
+pub(crate) mod tokio {
     use ::tokio::{io::ReadBuf, net::UdpSocket as TkUdpSocket};
 
-    /// Tokio ASync Socket`
-    pub type TokioUdpSocket = TkUdpSocket;
+    use super::*;
 
+    /// Tokio ASync Socket`
+    pub(crate) type TokioUdpSocket = TkUdpSocket;
     impl AsyncSocket for TokioUdpSocket {
         fn from_std(socket: UdpSocket) -> std::io::Result<Self> {
             socket.set_nonblocking(true)?;
