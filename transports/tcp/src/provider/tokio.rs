@@ -18,17 +18,18 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use super::{Incoming, Provider};
+use std::{
+    io, net,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use futures::{
     future::{BoxFuture, FutureExt},
     prelude::*,
 };
-use std::convert::TryFrom;
-use std::io;
-use std::net;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+
+use super::{Incoming, Provider};
 
 /// A TCP [`Transport`](libp2p_core::Transport) that works with the `tokio` ecosystem.
 ///
@@ -36,16 +37,21 @@ use std::task::{Context, Poll};
 ///
 /// ```rust
 /// # use libp2p_tcp as tcp;
-/// # use libp2p_core::Transport;
+/// # use libp2p_core::{Transport, transport::ListenerId};
 /// # use futures::future;
 /// # use std::pin::Pin;
 /// #
 /// # #[tokio::main]
 /// # async fn main() {
 /// let mut transport = tcp::tokio::Transport::new(tcp::Config::default());
-/// let id = transport.listen_on("/ip4/127.0.0.1/tcp/0".parse().unwrap()).unwrap();
+/// let id = transport
+///     .listen_on(ListenerId::next(), "/ip4/127.0.0.1/tcp/0".parse().unwrap())
+///     .unwrap();
 ///
-/// let addr = future::poll_fn(|cx| Pin::new(&mut transport).poll(cx)).await.into_new_address().unwrap();
+/// let addr = future::poll_fn(|cx| Pin::new(&mut transport).poll(cx))
+///     .await
+///     .into_new_address()
+///     .unwrap();
 ///
 /// println!("Listening on {addr}");
 /// # }

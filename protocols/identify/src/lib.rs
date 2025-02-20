@@ -28,10 +28,10 @@
 //!
 //! # Important Discrepancies
 //!
-//! - **Using Identify with other protocols** Unlike some other libp2p implementations,
-//! rust-libp2p does not treat Identify as a core protocol. This means that other protocols cannot
-//! rely upon the existence of Identify, and need to be manually hooked up to Identify in order to
-//! make use of its capabilities.
+//! - **Using Identify with other protocols** Unlike some other libp2p implementations, rust-libp2p
+//!   does not treat Identify as a core protocol. This means that other protocols cannot rely upon
+//!   the existence of Identify, and need to be manually hooked up to Identify in order to make use
+//!   of its capabilities.
 //!
 //! # Usage
 //!
@@ -41,35 +41,17 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
-pub use self::behaviour::{Behaviour, Config, Event};
-pub use self::protocol::{Info, UpgradeError, PROTOCOL_NAME, PUSH_PROTOCOL_NAME};
-
-#[deprecated(
-    since = "0.40.0",
-    note = "Use re-exports that omit `Identify` prefix, i.e. `libp2p_identify::Config`"
-)]
-pub type IdentifyConfig = Config;
-
-#[deprecated(
-    since = "0.40.0",
-    note = "Use re-exports that omit `Identify` prefix, i.e. `libp2p_identify::Event`"
-)]
-pub type IdentifyEvent = Event;
-
-#[deprecated(since = "0.40.0", note = "Use libp2p_identify::Behaviour instead.")]
-pub type Identify = Behaviour;
-
-#[deprecated(
-    since = "0.40.0",
-    note = "Use re-exports that omit `Identify` prefix, i.e. `libp2p_identify::Info`"
-)]
-pub type IdentifyInfo = Info;
+pub use self::{
+    behaviour::{Behaviour, Config, Event},
+    protocol::{Info, UpgradeError, PROTOCOL_NAME, PUSH_PROTOCOL_NAME},
+};
 
 mod behaviour;
 mod handler;
 mod protocol;
 
 mod proto {
+    #![allow(unreachable_pub)]
     include!("generated/mod.rs");
-    pub use self::structs::Identify;
+    pub(crate) use self::structs::Identify;
 }

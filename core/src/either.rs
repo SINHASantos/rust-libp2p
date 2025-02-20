@@ -18,16 +18,20 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::muxing::StreamMuxerEvent;
-use crate::{
-    muxing::StreamMuxer,
-    transport::{ListenerId, Transport, TransportError, TransportEvent},
-    Multiaddr, ProtocolName,
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
 };
+
 use either::Either;
 use futures::prelude::*;
 use pin_project::pin_project;
-use std::{pin::Pin, task::Context, task::Poll};
+
+use crate::{
+    muxing::{StreamMuxer, StreamMuxerEvent},
+    transport::{DialOpts, ListenerId, Transport, TransportError, TransportEvent},
+    Multiaddr,
+};
 
 impl<A, B> StreamMuxer for future::Either<A, B>
 where
@@ -115,21 +119,6 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum EitherName<A, B> {
-    A(A),
-    B(B),
-}
-
-impl<A: ProtocolName, B: ProtocolName> ProtocolName for EitherName<A, B> {
-    fn protocol_name(&self) -> &[u8] {
-        match self {
-            EitherName::A(a) => a.protocol_name(),
-            EitherName::B(b) => b.protocol_name(),
-        }
-    }
-}
-
 impl<A, B> Transport for Either<A, B>
 where
     B: Transport,
@@ -169,62 +158,41 @@ where
         }
     }
 
-    fn listen_on(&mut self, addr: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
+    fn listen_on(
+        &mut self,
+        id: ListenerId,
+        addr: Multiaddr,
+    ) -> Result<(), TransportError<Self::Error>> {
         use TransportError::*;
         match self {
-            Either::Left(a) => a.listen_on(addr).map_err(|e| match e {
+            Either::Left(a) => a.listen_on(id, addr).map_err(|e| match e {
                 MultiaddrNotSupported(addr) => MultiaddrNotSupported(addr),
                 Other(err) => Other(Either::Left(err)),
             }),
-            Either::Right(b) => b.listen_on(addr).map_err(|e| match e {
+            Either::Right(b) => b.listen_on(id, addr).map_err(|e| match e {
                 MultiaddrNotSupported(addr) => MultiaddrNotSupported(addr),
                 Other(err) => Other(Either::Right(err)),
             }),
         }
     }
 
-    fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
-        use TransportError::*;
-        match self {
-            Either::Left(a) => match a.dial(addr) {
-                Ok(connec) => Ok(EitherFuture::First(connec)),
-                Err(MultiaddrNotSupported(addr)) => Err(MultiaddrNotSupported(addr)),
-                Err(Other(err)) => Err(Other(Either::Left(err))),
-            },
-            Either::Right(b) => match b.dial(addr) {
-                Ok(connec) => Ok(EitherFuture::Second(connec)),
-                Err(MultiaddrNotSupported(addr)) => Err(MultiaddrNotSupported(addr)),
-                Err(Other(err)) => Err(Other(Either::Right(err))),
-            },
-        }
-    }
-
-    fn dial_as_listener(
+    fn dial(
         &mut self,
         addr: Multiaddr,
-    ) -> Result<Self::Dial, TransportError<Self::Error>>
-    where
-        Self: Sized,
-    {
+        opts: DialOpts,
+    ) -> Result<Self::Dial, TransportError<Self::Error>> {
         use TransportError::*;
         match self {
-            Either::Left(a) => match a.dial_as_listener(addr) {
+            Either::Left(a) => match a.dial(addr, opts) {
                 Ok(connec) => Ok(EitherFuture::First(connec)),
                 Err(MultiaddrNotSupported(addr)) => Err(MultiaddrNotSupported(addr)),
                 Err(Other(err)) => Err(Other(Either::Left(err))),
             },
-            Either::Right(b) => match b.dial_as_listener(addr) {
+            Either::Right(b) => match b.dial(addr, opts) {
                 Ok(connec) => Ok(EitherFuture::Second(connec)),
                 Err(MultiaddrNotSupported(addr)) => Err(MultiaddrNotSupported(addr)),
                 Err(Other(err)) => Err(Other(Either::Right(err))),
             },
-        }
-    }
-
-    fn address_translation(&self, server: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
-        match self {
-            Either::Left(a) => a.address_translation(server, observed),
-            Either::Right(b) => b.address_translation(server, observed),
         }
     }
 }

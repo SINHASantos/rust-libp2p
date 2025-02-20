@@ -19,26 +19,28 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::upgrade::{InboundUpgrade, OutboundUpgrade, ProtocolName, UpgradeInfo};
-use futures::future;
-use std::iter;
-use void::Void;
+use std::{convert::Infallible, iter};
 
-/// Implementation of [`UpgradeInfo`], [`InboundUpgrade`] and [`OutboundUpgrade`] that directly yields the substream.
+use futures::future;
+
+use crate::upgrade::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
+
+/// Implementation of [`UpgradeInfo`], [`InboundUpgrade`] and [`OutboundUpgrade`]
+/// that directly yields the substream.
 #[derive(Debug, Copy, Clone)]
 pub struct ReadyUpgrade<P> {
     protocol_name: P,
 }
 
 impl<P> ReadyUpgrade<P> {
-    pub fn new(protocol_name: P) -> Self {
+    pub const fn new(protocol_name: P) -> Self {
         Self { protocol_name }
     }
 }
 
 impl<P> UpgradeInfo for ReadyUpgrade<P>
 where
-    P: ProtocolName + Clone,
+    P: AsRef<str> + Clone,
 {
     type Info = P;
     type InfoIter = iter::Once<P>;
@@ -50,10 +52,10 @@ where
 
 impl<C, P> InboundUpgrade<C> for ReadyUpgrade<P>
 where
-    P: ProtocolName + Clone,
+    P: AsRef<str> + Clone,
 {
     type Output = C;
-    type Error = Void;
+    type Error = Infallible;
     type Future = future::Ready<Result<Self::Output, Self::Error>>;
 
     fn upgrade_inbound(self, stream: C, _: Self::Info) -> Self::Future {
@@ -63,10 +65,10 @@ where
 
 impl<C, P> OutboundUpgrade<C> for ReadyUpgrade<P>
 where
-    P: ProtocolName + Clone,
+    P: AsRef<str> + Clone,
 {
     type Output = C;
-    type Error = Void;
+    type Error = Infallible;
     type Future = future::Ready<Result<Self::Output, Self::Error>>;
 
     fn upgrade_outbound(self, stream: C, _: Self::Info) -> Self::Future {

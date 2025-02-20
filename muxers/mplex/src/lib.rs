@@ -26,18 +26,28 @@ mod codec;
 mod config;
 mod io;
 
-pub use config::{MaxBufferBehaviour, MplexConfig};
+use std::{
+    cmp, iter,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 use bytes::Bytes;
 use codec::LocalStreamId;
-use futures::{future, prelude::*, ready};
-use libp2p_core::muxing::{StreamMuxer, StreamMuxerEvent};
-use libp2p_core::upgrade::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
+pub use config::{Config, MaxBufferBehaviour};
+use futures::{prelude::*, ready};
+use libp2p_core::{
+    muxing::{StreamMuxer, StreamMuxerEvent},
+    upgrade::{InboundConnectionUpgrade, OutboundConnectionUpgrade, UpgradeInfo},
+};
 use parking_lot::Mutex;
-use std::{cmp, iter, pin::Pin, sync::Arc, task::Context, task::Poll};
 
-impl UpgradeInfo for MplexConfig {
-    type Info = &'static [u8];
+#[deprecated = "Use `Config` instead"]
+pub type MplexConfig = Config;
+
+impl UpgradeInfo for Config {
+    type Info = &'static str;
     type InfoIter = iter::Once<Self::Info>;
 
     fn protocol_info(&self) -> Self::InfoIter {
@@ -45,7 +55,7 @@ impl UpgradeInfo for MplexConfig {
     }
 }
 
-impl<C> InboundUpgrade<C> for MplexConfig
+impl<C> InboundConnectionUpgrade<C> for Config
 where
     C: AsyncRead + AsyncWrite + Unpin,
 {
@@ -55,12 +65,13 @@ where
 
     fn upgrade_inbound(self, socket: C, _: Self::Info) -> Self::Future {
         future::ready(Ok(Multiplex {
+            #[allow(unknown_lints, clippy::arc_with_non_send_sync)] // `T` is not enforced to be `Send` but we don't want to constrain it either.
             io: Arc::new(Mutex::new(io::Multiplexed::new(socket, self))),
         }))
     }
 }
 
-impl<C> OutboundUpgrade<C> for MplexConfig
+impl<C> OutboundConnectionUpgrade<C> for Config
 where
     C: AsyncRead + AsyncWrite + Unpin,
 {
@@ -70,6 +81,7 @@ where
 
     fn upgrade_outbound(self, socket: C, _: Self::Info) -> Self::Future {
         future::ready(Ok(Multiplex {
+            #[allow(unknown_lints, clippy::arc_with_non_send_sync)] // `T` is not enforced to be `Send` but we don't want to constrain it either.
             io: Arc::new(Mutex::new(io::Multiplexed::new(socket, self))),
         }))
     }

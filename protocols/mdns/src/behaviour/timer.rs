@@ -18,10 +18,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use std::{
-    marker::Unpin,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 /// Simple wrapper for the different type of timers
 #[derive(Debug)]
@@ -31,6 +28,7 @@ pub struct Timer<T> {
 }
 
 /// Builder interface to homogenize the different implementations
+#[allow(unreachable_pub)] // Users should not depend on this.
 pub trait Builder: Send + Unpin + 'static {
     /// Creates a timer that emits an event once at the given time instant.
     fn at(instant: Instant) -> Self;
@@ -43,18 +41,19 @@ pub trait Builder: Send + Unpin + 'static {
 }
 
 #[cfg(feature = "async-io")]
-pub mod asio {
-    use super::*;
-    use async_io::Timer as AsioTimer;
-    use futures::Stream;
+pub(crate) mod asio {
     use std::{
         pin::Pin,
         task::{Context, Poll},
     };
 
-    /// Async Timer
-    pub type AsyncTimer = Timer<AsioTimer>;
+    use async_io::Timer as AsioTimer;
+    use futures::Stream;
 
+    use super::*;
+
+    /// Async Timer
+    pub(crate) type AsyncTimer = Timer<AsioTimer>;
     impl Builder for AsyncTimer {
         fn at(instant: Instant) -> Self {
             Self {
@@ -85,24 +84,25 @@ pub mod asio {
 }
 
 #[cfg(feature = "tokio")]
-pub mod tokio {
-    use super::*;
-    use ::tokio::time::{self, Instant as TokioInstant, Interval, MissedTickBehavior};
-    use futures::Stream;
+pub(crate) mod tokio {
     use std::{
         pin::Pin,
         task::{Context, Poll},
     };
 
-    /// Tokio wrapper
-    pub type TokioTimer = Timer<Interval>;
+    use ::tokio::time::{self, Instant as TokioInstant, Interval, MissedTickBehavior};
+    use futures::Stream;
 
+    use super::*;
+
+    /// Tokio wrapper
+    pub(crate) type TokioTimer = Timer<Interval>;
     impl Builder for TokioTimer {
         fn at(instant: Instant) -> Self {
             // Taken from: https://docs.rs/async-io/1.7.0/src/async_io/lib.rs.html#91
             let mut inner = time::interval_at(
                 TokioInstant::from_std(instant),
-                Duration::new(std::u64::MAX, 1_000_000_000 - 1),
+                Duration::new(u64::MAX, 1_000_000_000 - 1),
             );
             inner.set_missed_tick_behavior(MissedTickBehavior::Skip);
             Self { inner }
@@ -129,7 +129,7 @@ pub mod tokio {
         }
 
         fn size_hint(&self) -> (usize, Option<usize>) {
-            (std::usize::MAX, None)
+            (usize::MAX, None)
         }
     }
 }

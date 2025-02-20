@@ -19,17 +19,44 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::ConnectionId;
-use libp2p_core::connection::Endpoint;
-use libp2p_core::multiaddr::Protocol;
-use libp2p_core::multihash::Multihash;
-use libp2p_core::{Multiaddr, PeerId};
 use std::num::NonZeroU8;
+
+use libp2p_core::{connection::Endpoint, multiaddr::Protocol, transport::PortUse, Multiaddr};
+use libp2p_identity::PeerId;
+
+use crate::ConnectionId;
+
+macro_rules! fn_override_role {
+    () => {
+        /// Override role of local node on connection. I.e. execute the dial _as a
+        /// listener_.
+        ///
+        /// See
+        /// [`ConnectedPoint::Dialer`](libp2p_core::connection::ConnectedPoint::Dialer)
+        /// for details.
+        pub fn override_role(mut self) -> Self {
+            self.role_override = Endpoint::Listener;
+            self
+        }
+    };
+}
+
+macro_rules! fn_allocate_new_port {
+    () => {
+        /// Enforce the allocation of a new port.
+        /// Default behaviour is best effort reuse of existing ports. If there is no existing
+        /// fitting listener, a new port is allocated.
+        pub fn allocate_new_port(mut self) -> Self {
+            self.port_use = PortUse::New;
+            self
+        }
+    };
+}
 
 /// Options to configure a dial to a known or unknown peer.
 ///
 /// Used in [`Swarm::dial`](crate::Swarm::dial) and
-/// [`NetworkBehaviourAction::Dial`](crate::behaviour::NetworkBehaviourAction::Dial).
+/// [`ToSwarm::Dial`](crate::behaviour::ToSwarm::Dial).
 ///
 /// To construct use either of:
 ///
@@ -45,6 +72,7 @@ pub struct DialOpts {
     role_override: Endpoint,
     dial_concurrency_factor_override: Option<NonZeroU8>,
     connection_id: ConnectionId,
+    port_use: PortUse,
 }
 
 impl DialOpts {
@@ -52,7 +80,7 @@ impl DialOpts {
     ///
     ///   ```
     ///   # use libp2p_swarm::dial_opts::{DialOpts, PeerCondition};
-    ///   # use libp2p_core::PeerId;
+    ///   # use libp2p_identity::PeerId;
     ///   DialOpts::peer_id(PeerId::random())
     ///      .condition(PeerCondition::Disconnected)
     ///      .addresses(vec!["/ip6/::1/tcp/12345".parse().unwrap()])
@@ -65,6 +93,7 @@ impl DialOpts {
             condition: Default::default(),
             role_override: Endpoint::Dialer,
             dial_concurrency_factor_override: Default::default(),
+            port_use: PortUse::Reuse,
         }
     }
 
@@ -80,51 +109,30 @@ impl DialOpts {
         WithoutPeerId {}
     }
 
-    /// Get the [`PeerId`] specified in a [`DialOpts`] if any.
+    /// Retrieves the [`PeerId`] from the [`DialOpts`] if specified or otherwise tries to extract it
+    /// from the multihash in the `/p2p` part of the address, if present.
     pub fn get_peer_id(&self) -> Option<PeerId> {
-        self.peer_id
+        if let Some(peer_id) = self.peer_id {
+            return Some(peer_id);
+        }
+
+        let first_address = self.addresses.first()?;
+        let last_protocol = first_address.iter().last()?;
+
+        if let Protocol::P2p(p) = last_protocol {
+            return Some(p);
+        }
+
+        None
     }
 
     /// Get the [`ConnectionId`] of this dial attempt.
     ///
     /// All future events of this dial will be associated with this ID.
-    /// See [`DialFailure`](crate::DialFailure) and [`ConnectionEstablished`](crate::behaviour::ConnectionEstablished).
+    /// See [`DialFailure`](crate::DialFailure) and
+    /// [`ConnectionEstablished`](crate::behaviour::ConnectionEstablished).
     pub fn connection_id(&self) -> ConnectionId {
         self.connection_id
-    }
-
-    /// Retrieves the [`PeerId`] from the [`DialOpts`] if specified or otherwise tries to parse it
-    /// from the multihash in the `/p2p` part of the address, if present.
-    ///
-    /// Note: A [`Multiaddr`] with something else other than a [`PeerId`] within the `/p2p` protocol is invalid as per specification.
-    /// Unfortunately, we are not making good use of the type system here.
-    /// Really, this function should be merged with [`DialOpts::get_peer_id`] above.
-    /// If it weren't for the parsing error, the function signatures would be the same.
-    ///
-    /// See <https://github.com/multiformats/rust-multiaddr/issues/73>.
-    pub(crate) fn get_or_parse_peer_id(&self) -> Result<Option<PeerId>, Multihash> {
-        if let Some(peer_id) = self.peer_id {
-            return Ok(Some(peer_id));
-        }
-
-        let first_address = match self.addresses.first() {
-            Some(first_address) => first_address,
-            None => return Ok(None),
-        };
-
-        let maybe_peer_id = first_address
-            .iter()
-            .last()
-            .and_then(|p| {
-                if let Protocol::P2p(ma) = p {
-                    Some(PeerId::try_from(ma))
-                } else {
-                    None
-                }
-            })
-            .transpose()?;
-
-        Ok(maybe_peer_id)
     }
 
     pub(crate) fn get_addresses(&self) -> Vec<Multiaddr> {
@@ -146,6 +154,10 @@ impl DialOpts {
     pub(crate) fn role_override(&self) -> Endpoint {
         self.role_override
     }
+
+    pub(crate) fn port_use(&self) -> PortUse {
+        self.port_use
+    }
 }
 
 impl From<Multiaddr> for DialOpts {
@@ -166,6 +178,7 @@ pub struct WithPeerId {
     condition: PeerCondition,
     role_override: Endpoint,
     dial_concurrency_factor_override: Option<NonZeroU8>,
+    port_use: PortUse,
 }
 
 impl WithPeerId {
@@ -191,24 +204,14 @@ impl WithPeerId {
             extend_addresses_through_behaviour: false,
             role_override: self.role_override,
             dial_concurrency_factor_override: self.dial_concurrency_factor_override,
+            port_use: self.port_use,
         }
     }
 
-    /// Override role of local node on connection. I.e. execute the dial _as a
-    /// listener_.
-    ///
-    /// See
-    /// [`ConnectedPoint::Dialer`](libp2p_core::connection::ConnectedPoint::Dialer)
-    /// for details.
-    pub fn override_role(mut self) -> Self {
-        self.role_override = Endpoint::Listener;
-        self
-    }
+    fn_override_role!();
+    fn_allocate_new_port!();
 
     /// Build the final [`DialOpts`].
-    ///
-    /// Addresses to dial the peer are retrieved via
-    /// [`NetworkBehaviour::addresses_of_peer`](crate::behaviour::NetworkBehaviour::addresses_of_peer).
     pub fn build(self) -> DialOpts {
         DialOpts {
             peer_id: Some(self.peer_id),
@@ -218,6 +221,7 @@ impl WithPeerId {
             role_override: self.role_override,
             dial_concurrency_factor_override: self.dial_concurrency_factor_override,
             connection_id: ConnectionId::next(),
+            port_use: self.port_use,
         }
     }
 }
@@ -230,6 +234,7 @@ pub struct WithPeerIdWithAddresses {
     extend_addresses_through_behaviour: bool,
     role_override: Endpoint,
     dial_concurrency_factor_override: Option<NonZeroU8>,
+    port_use: PortUse,
 }
 
 impl WithPeerIdWithAddresses {
@@ -240,22 +245,14 @@ impl WithPeerIdWithAddresses {
     }
 
     /// In addition to the provided addresses, extend the set via
-    /// [`NetworkBehaviour::addresses_of_peer`](crate::behaviour::NetworkBehaviour::addresses_of_peer).
+    /// [`NetworkBehaviour::handle_pending_outbound_connection`](crate::behaviour::NetworkBehaviour::handle_pending_outbound_connection).
     pub fn extend_addresses_through_behaviour(mut self) -> Self {
         self.extend_addresses_through_behaviour = true;
         self
     }
 
-    /// Override role of local node on connection. I.e. execute the dial _as a
-    /// listener_.
-    ///
-    /// See
-    /// [`ConnectedPoint::Dialer`](libp2p_core::connection::ConnectedPoint::Dialer)
-    /// for details.
-    pub fn override_role(mut self) -> Self {
-        self.role_override = Endpoint::Listener;
-        self
-    }
+    fn_override_role!();
+    fn_allocate_new_port!();
 
     /// Override
     /// Number of addresses concurrently dialed for a single outbound connection attempt.
@@ -274,6 +271,7 @@ impl WithPeerIdWithAddresses {
             role_override: self.role_override,
             dial_concurrency_factor_override: self.dial_concurrency_factor_override,
             connection_id: ConnectionId::next(),
+            port_use: self.port_use,
         }
     }
 }
@@ -287,6 +285,7 @@ impl WithoutPeerId {
         WithoutPeerIdWithAddress {
             address,
             role_override: Endpoint::Dialer,
+            port_use: PortUse::Reuse,
         }
     }
 }
@@ -295,19 +294,13 @@ impl WithoutPeerId {
 pub struct WithoutPeerIdWithAddress {
     address: Multiaddr,
     role_override: Endpoint,
+    port_use: PortUse,
 }
 
 impl WithoutPeerIdWithAddress {
-    /// Override role of local node on connection. I.e. execute the dial _as a
-    /// listener_.
-    ///
-    /// See
-    /// [`ConnectedPoint::Dialer`](libp2p_core::connection::ConnectedPoint::Dialer)
-    /// for details.
-    pub fn override_role(mut self) -> Self {
-        self.role_override = Endpoint::Listener;
-        self
-    }
+    fn_override_role!();
+    fn_allocate_new_port!();
+
     /// Build the final [`DialOpts`].
     pub fn build(self) -> DialOpts {
         DialOpts {
@@ -318,6 +311,7 @@ impl WithoutPeerIdWithAddress {
             role_override: self.role_override,
             dial_concurrency_factor_override: None,
             connection_id: ConnectionId::next(),
+            port_use: self.port_use,
         }
     }
 }
@@ -327,23 +321,27 @@ impl WithoutPeerIdWithAddress {
 ///
 /// ```
 /// # use libp2p_swarm::dial_opts::{DialOpts, PeerCondition};
-/// # use libp2p_core::PeerId;
+/// # use libp2p_identity::PeerId;
 /// #
 /// DialOpts::peer_id(PeerId::random())
-///    .condition(PeerCondition::Disconnected)
-///    .build();
+///     .condition(PeerCondition::Disconnected)
+///     .build();
 /// ```
 #[derive(Debug, Copy, Clone, Default)]
 pub enum PeerCondition {
     /// A new dialing attempt is initiated _only if_ the peer is currently
-    /// considered disconnected, i.e. there is no established connection
-    /// and no ongoing dialing attempt.
-    #[default]
+    /// considered disconnected, i.e. there is no established connection.
     Disconnected,
     /// A new dialing attempt is initiated _only if_ there is currently
     /// no ongoing dialing attempt, i.e. the peer is either considered
     /// disconnected or connected but without an ongoing dialing attempt.
     NotDialing,
+    /// A combination of [`Disconnected`](PeerCondition::Disconnected) and
+    /// [`NotDialing`](PeerCondition::NotDialing). A new dialing attempt is
+    /// initiated _only if_ the peer is both considered disconnected and there
+    /// is currently no ongoing dialing attempt.
+    #[default]
+    DisconnectedAndNotDialing,
     /// A new dialing attempt is always initiated, only subject to the
     /// configured connection limits.
     Always,

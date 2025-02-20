@@ -18,17 +18,20 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use async_std::prelude::FutureExt;
-use futures::stream::{FuturesUnordered, SelectAll};
-use futures::StreamExt;
+use std::{task::Poll, time::Duration};
+
+use futures::{
+    stream::{FuturesUnordered, SelectAll},
+    StreamExt,
+};
 use libp2p_gossipsub as gossipsub;
 use libp2p_gossipsub::{MessageAuthenticity, ValidationMode};
 use libp2p_swarm::Swarm;
 use libp2p_swarm_test::SwarmExt as _;
-use log::debug;
-use quickcheck_ext::{QuickCheck, TestResult};
+use quickcheck::{QuickCheck, TestResult};
 use rand::{seq::SliceRandom, SeedableRng};
-use std::{task::Poll, time::Duration};
+use tokio::{runtime::Runtime, time};
+use tracing_subscriber::EnvFilter;
 
 struct Graph {
     nodes: SelectAll<Swarm<gossipsub::Behaviour>>,
@@ -85,7 +88,7 @@ impl Graph {
             }
         };
 
-        match condition.timeout(Duration::from_secs(10)).await {
+        match time::timeout(Duration::from_secs(10), condition).await {
             Ok(()) => true,
             Err(_) => false,
         }
@@ -99,7 +102,7 @@ impl Graph {
                 Poll::Pending => return Poll::Ready(()),
             }
         });
-        fut.timeout(Duration::from_secs(10)).await.unwrap();
+        time::timeout(Duration::from_secs(10), fut).await.unwrap();
     }
 }
 
@@ -122,23 +125,27 @@ async fn build_node() -> Swarm<gossipsub::Behaviour> {
             .unwrap();
         gossipsub::Behaviour::new(MessageAuthenticity::Author(peer_id), config).unwrap()
     });
-    swarm.listen().await;
+    swarm.listen().with_memory_addr_external().await;
 
     swarm
 }
 
 #[test]
 fn multi_hop_propagation() {
-    let _ = env_logger::try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init();
 
     fn prop(num_nodes: u8, seed: u64) -> TestResult {
         if !(2..=50).contains(&num_nodes) {
             return TestResult::discard();
         }
 
-        debug!("number nodes: {:?}, seed: {:?}", num_nodes, seed);
+        tracing::debug!(number_of_nodes=%num_nodes, seed=%seed);
 
-        async_std::task::block_on(async move {
+        let rt = Runtime::new().unwrap();
+
+        rt.block_on(async move {
             let mut graph = Graph::new_connected(num_nodes as usize, seed).await;
             let number_nodes = graph.nodes.len();
 

@@ -18,99 +18,26 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::proto;
-use crate::protocol::{HOP_PROTOCOL_NAME, MAX_MESSAGE_SIZE};
+use std::time::Duration;
+
 use asynchronous_codec::{Framed, FramedParts};
 use bytes::Bytes;
-use futures::{future::BoxFuture, prelude::*};
-use instant::{Duration, SystemTime};
-use libp2p_core::{upgrade, Multiaddr, PeerId};
-use libp2p_swarm::NegotiatedSubstream;
-use std::convert::TryInto;
-use std::iter;
+use either::Either;
+use futures::prelude::*;
+use libp2p_core::Multiaddr;
+use libp2p_identity::PeerId;
+use libp2p_swarm::Stream;
 use thiserror::Error;
+use web_time::SystemTime;
 
-pub struct Upgrade {
-    pub reservation_duration: Duration,
-    pub max_circuit_duration: Duration,
-    pub max_circuit_bytes: u64,
-}
-
-impl upgrade::UpgradeInfo for Upgrade {
-    type Info = &'static [u8];
-    type InfoIter = iter::Once<Self::Info>;
-
-    fn protocol_info(&self) -> Self::InfoIter {
-        iter::once(HOP_PROTOCOL_NAME)
-    }
-}
-
-impl upgrade::InboundUpgrade<NegotiatedSubstream> for Upgrade {
-    type Output = Req;
-    type Error = UpgradeError;
-    type Future = BoxFuture<'static, Result<Self::Output, Self::Error>>;
-
-    fn upgrade_inbound(self, substream: NegotiatedSubstream, _: Self::Info) -> Self::Future {
-        let mut substream = Framed::new(
-            substream,
-            quick_protobuf_codec::Codec::new(MAX_MESSAGE_SIZE),
-        );
-
-        async move {
-            let proto::HopMessage {
-                type_pb,
-                peer,
-                reservation: _,
-                limit: _,
-                status: _,
-            } = substream
-                .next()
-                .await
-                .ok_or(FatalUpgradeError::StreamClosed)??;
-
-            let req = match type_pb {
-                proto::HopMessageType::RESERVE => Req::Reserve(ReservationReq {
-                    substream,
-                    reservation_duration: self.reservation_duration,
-                    max_circuit_duration: self.max_circuit_duration,
-                    max_circuit_bytes: self.max_circuit_bytes,
-                }),
-                proto::HopMessageType::CONNECT => {
-                    let dst = PeerId::from_bytes(&peer.ok_or(FatalUpgradeError::MissingPeer)?.id)
-                        .map_err(|_| FatalUpgradeError::ParsePeerId)?;
-                    Req::Connect(CircuitReq { dst, substream })
-                }
-                proto::HopMessageType::STATUS => {
-                    return Err(FatalUpgradeError::UnexpectedTypeStatus.into())
-                }
-            };
-
-            Ok(req)
-        }
-        .boxed()
-    }
-}
+use crate::{proto, proto::message_v2::pb::mod_HopMessage::Type, protocol::MAX_MESSAGE_SIZE};
 
 #[derive(Debug, Error)]
-pub enum UpgradeError {
-    #[error("Fatal")]
-    Fatal(#[from] FatalUpgradeError),
-}
-
-impl From<quick_protobuf_codec::Error> for UpgradeError {
-    fn from(error: quick_protobuf_codec::Error) -> Self {
-        Self::Fatal(error.into())
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum FatalUpgradeError {
+pub enum Error {
     #[error(transparent)]
     Codec(#[from] quick_protobuf_codec::Error),
     #[error("Stream closed")]
     StreamClosed,
-    #[error("Failed to parse response type field.")]
-    ParseTypeField,
     #[error("Failed to parse peer id.")]
     ParsePeerId,
     #[error("Expected 'peer' field to be set.")]
@@ -119,20 +46,22 @@ pub enum FatalUpgradeError {
     UnexpectedTypeStatus,
 }
 
-pub enum Req {
-    Reserve(ReservationReq),
-    Connect(CircuitReq),
-}
-
 pub struct ReservationReq {
-    substream: Framed<NegotiatedSubstream, quick_protobuf_codec::Codec<proto::HopMessage>>,
+    substream: Framed<Stream, quick_protobuf_codec::Codec<proto::HopMessage>>,
     reservation_duration: Duration,
     max_circuit_duration: Duration,
     max_circuit_bytes: u64,
 }
 
 impl ReservationReq {
-    pub async fn accept(self, addrs: Vec<Multiaddr>) -> Result<(), UpgradeError> {
+    pub async fn accept(self, addrs: Vec<Multiaddr>) -> Result<(), Error> {
+        if addrs.is_empty() {
+            tracing::debug!(
+                "Accepting relay reservation without providing external addresses of local node. \
+                 Thus the remote node might not be able to advertise its relayed address."
+            )
+        }
+
         let msg = proto::HopMessage {
             type_pb: proto::HopMessageType::STATUS,
             peer: None,
@@ -159,7 +88,7 @@ impl ReservationReq {
         self.send(msg).await
     }
 
-    pub async fn deny(self, status: proto::Status) -> Result<(), UpgradeError> {
+    pub async fn deny(self, status: proto::Status) -> Result<(), Error> {
         let msg = proto::HopMessage {
             type_pb: proto::HopMessageType::STATUS,
             peer: None,
@@ -171,7 +100,7 @@ impl ReservationReq {
         self.send(msg).await
     }
 
-    async fn send(mut self, msg: proto::HopMessage) -> Result<(), UpgradeError> {
+    async fn send(mut self, msg: proto::HopMessage) -> Result<(), Error> {
         self.substream.send(msg).await?;
         self.substream.flush().await?;
         self.substream.close().await?;
@@ -182,7 +111,9 @@ impl ReservationReq {
 
 pub struct CircuitReq {
     dst: PeerId,
-    substream: Framed<NegotiatedSubstream, quick_protobuf_codec::Codec<proto::HopMessage>>,
+    substream: Framed<Stream, quick_protobuf_codec::Codec<proto::HopMessage>>,
+    max_circuit_duration: Duration,
+    max_circuit_bytes: u64,
 }
 
 impl CircuitReq {
@@ -190,12 +121,20 @@ impl CircuitReq {
         self.dst
     }
 
-    pub async fn accept(mut self) -> Result<(NegotiatedSubstream, Bytes), UpgradeError> {
+    pub async fn accept(mut self) -> Result<(Stream, Bytes), Error> {
         let msg = proto::HopMessage {
             type_pb: proto::HopMessageType::STATUS,
             peer: None,
             reservation: None,
-            limit: None,
+            limit: Some(proto::Limit {
+                duration: Some(
+                    self.max_circuit_duration
+                        .as_secs()
+                        .try_into()
+                        .expect("`max_circuit_duration` not to exceed `u32::MAX`."),
+                ),
+                data: Some(self.max_circuit_bytes),
+            }),
             status: Some(proto::Status::OK),
         };
 
@@ -215,7 +154,7 @@ impl CircuitReq {
         Ok((io, read_buffer.freeze()))
     }
 
-    pub async fn deny(mut self, status: proto::Status) -> Result<(), UpgradeError> {
+    pub async fn deny(mut self, status: proto::Status) -> Result<(), Error> {
         let msg = proto::HopMessage {
             type_pb: proto::HopMessageType::STATUS,
             peer: None,
@@ -233,4 +172,54 @@ impl CircuitReq {
 
         Ok(())
     }
+}
+
+pub(crate) async fn handle_inbound_request(
+    io: Stream,
+    reservation_duration: Duration,
+    max_circuit_duration: Duration,
+    max_circuit_bytes: u64,
+) -> Result<Either<ReservationReq, CircuitReq>, Error> {
+    let mut substream = Framed::new(io, quick_protobuf_codec::Codec::new(MAX_MESSAGE_SIZE));
+
+    let res = substream.next().await;
+
+    if let None | Some(Err(_)) = res {
+        return Err(Error::StreamClosed);
+    }
+
+    let proto::HopMessage {
+        type_pb,
+        peer,
+        reservation: _,
+        limit: _,
+        status: _,
+    } = res.unwrap().expect("should be ok");
+
+    let req = match type_pb {
+        Type::RESERVE => Either::Left(ReservationReq {
+            substream,
+            reservation_duration,
+            max_circuit_duration,
+            max_circuit_bytes,
+        }),
+        Type::CONNECT => {
+            let peer_id_res = match peer {
+                Some(r) => PeerId::from_bytes(&r.id),
+                None => return Err(Error::MissingPeer),
+            };
+
+            let dst = peer_id_res.map_err(|_| Error::ParsePeerId)?;
+
+            Either::Right(CircuitReq {
+                dst,
+                substream,
+                max_circuit_duration,
+                max_circuit_bytes,
+            })
+        }
+        Type::STATUS => return Err(Error::UnexpectedTypeStatus),
+    };
+
+    Ok(req)
 }

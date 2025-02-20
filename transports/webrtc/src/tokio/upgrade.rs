@@ -18,31 +18,26 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-mod noise;
-
-use futures::channel::oneshot;
-use futures::future::Either;
-use futures_timer::Delay;
-use libp2p_core::{identity, PeerId};
-use rand::distributions::Alphanumeric;
-use rand::{thread_rng, Rng};
-use webrtc::api::setting_engine::SettingEngine;
-use webrtc::api::APIBuilder;
-use webrtc::data::data_channel::DataChannel;
-use webrtc::data_channel::data_channel_init::RTCDataChannelInit;
-use webrtc::dtls_transport::dtls_role::DTLSRole;
-use webrtc::ice::network_type::NetworkType;
-use webrtc::ice::udp_mux::UDPMux;
-use webrtc::ice::udp_network::UDPNetwork;
-use webrtc::peer_connection::configuration::RTCConfiguration;
-use webrtc::peer_connection::RTCPeerConnection;
-
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use crate::tokio::{error::Error, fingerprint::Fingerprint, sdp, substream::Substream, Connection};
+use futures::{channel::oneshot, future::Either};
+use futures_timer::Delay;
+use libp2p_identity as identity;
+use libp2p_identity::PeerId;
+use libp2p_webrtc_utils::{noise, Fingerprint};
+use webrtc::{
+    api::{setting_engine::SettingEngine, APIBuilder},
+    data::data_channel::DataChannel,
+    data_channel::data_channel_init::RTCDataChannelInit,
+    dtls_transport::dtls_role::DTLSRole,
+    ice::{network_type::NetworkType, udp_mux::UDPMux, udp_network::UDPNetwork},
+    peer_connection::{configuration::RTCConfiguration, RTCPeerConnection},
+};
+
+use crate::tokio::{error::Error, sdp, sdp::random_ufrag, stream::Stream, Connection};
 
 /// Creates a new outbound WebRTC connection.
-pub async fn outbound(
+pub(crate) async fn outbound(
     addr: SocketAddr,
     config: RTCConfiguration,
     udp_mux: Arc<dyn UDPMux + Send + Sync>,
@@ -50,19 +45,16 @@ pub async fn outbound(
     server_fingerprint: Fingerprint,
     id_keys: identity::Keypair,
 ) -> Result<(PeerId, Connection), Error> {
-    log::debug!("new outbound connection to {addr})");
+    tracing::debug!(address=%addr, "new outbound connection to address");
 
     let (peer_connection, ufrag) = new_outbound_connection(addr, config, udp_mux).await?;
 
     let offer = peer_connection.create_offer(None).await?;
-    log::debug!("created SDP offer for outbound connection: {:?}", offer.sdp);
+    tracing::debug!(offer=%offer.sdp, "created SDP offer for outbound connection");
     peer_connection.set_local_description(offer).await?;
 
-    let answer = sdp::answer(addr, &server_fingerprint, &ufrag);
-    log::debug!(
-        "calculated SDP answer for outbound connection: {:?}",
-        answer
-    );
+    let answer = sdp::answer(addr, server_fingerprint, &ufrag);
+    tracing::debug!(?answer, "calculated SDP answer for outbound connection");
     peer_connection.set_remote_description(answer).await?; // This will start the gathering of ICE candidates.
 
     let data_channel = create_substream_for_noise_handshake(&peer_connection).await?;
@@ -78,7 +70,7 @@ pub async fn outbound(
 }
 
 /// Creates a new inbound WebRTC connection.
-pub async fn inbound(
+pub(crate) async fn inbound(
     addr: SocketAddr,
     config: RTCConfiguration,
     udp_mux: Arc<dyn UDPMux + Send + Sync>,
@@ -86,16 +78,16 @@ pub async fn inbound(
     remote_ufrag: String,
     id_keys: identity::Keypair,
 ) -> Result<(PeerId, Connection), Error> {
-    log::debug!("new inbound connection from {addr} (ufrag: {remote_ufrag})");
+    tracing::debug!(address=%addr, ufrag=%remote_ufrag, "new inbound connection from address");
 
     let peer_connection = new_inbound_connection(addr, config, udp_mux, &remote_ufrag).await?;
 
     let offer = sdp::offer(addr, &remote_ufrag);
-    log::debug!("calculated SDP offer for inbound connection: {:?}", offer);
+    tracing::debug!(?offer, "calculated SDP offer for inbound connection");
     peer_connection.set_remote_description(offer).await?;
 
     let answer = peer_connection.create_answer(None).await?;
-    log::debug!("created SDP answer for inbound connection: {:?}", answer);
+    tracing::debug!(?answer, "created SDP answer for inbound connection");
     peer_connection.set_local_description(answer).await?; // This will start the gathering of ICE candidates.
 
     let data_channel = create_substream_for_noise_handshake(&peer_connection).await?;
@@ -154,18 +146,6 @@ async fn new_inbound_connection(
     Ok(connection)
 }
 
-/// Generates a random ufrag and adds a prefix according to the spec.
-fn random_ufrag() -> String {
-    format!(
-        "libp2p+webrtc+v1/{}",
-        thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(64)
-            .map(char::from)
-            .collect::<String>()
-    )
-}
-
 fn setting_engine(
     udp_mux: Arc<dyn UDPMux + Send + Sync>,
     ufrag: &str,
@@ -202,9 +182,7 @@ async fn get_remote_fingerprint(conn: &RTCPeerConnection) -> Fingerprint {
     Fingerprint::from_certificate(&cert_bytes)
 }
 
-async fn create_substream_for_noise_handshake(
-    conn: &RTCPeerConnection,
-) -> Result<Substream, Error> {
+async fn create_substream_for_noise_handshake(conn: &RTCPeerConnection) -> Result<Stream, Error> {
     // NOTE: the data channel w/ `negotiated` flag set to `true` MUST be created on both ends.
     let data_channel = conn
         .create_data_channel(
@@ -233,7 +211,7 @@ async fn create_substream_for_noise_handshake(
         }
     };
 
-    let (substream, drop_listener) = Substream::new(channel);
+    let (substream, drop_listener) = Stream::new(channel);
     drop(drop_listener); // Don't care about cancelled substreams during initial handshake.
 
     Ok(substream)

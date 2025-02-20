@@ -18,15 +18,23 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::handler::{
-    ConnectionEvent, ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr,
-    DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound, KeepAlive,
-    SubstreamProtocol,
+use std::{
+    error,
+    fmt::Debug,
+    task::{Context, Poll},
+    time::Duration,
 };
-use crate::upgrade::{InboundUpgradeSend, OutboundUpgradeSend};
-use instant::Instant;
+
 use smallvec::SmallVec;
-use std::{error, fmt::Debug, task::Context, task::Poll, time::Duration};
+
+use crate::{
+    handler::{
+        ConnectionEvent, ConnectionHandler, ConnectionHandlerEvent, DialUpgradeError,
+        FullyNegotiatedInbound, FullyNegotiatedOutbound, SubstreamProtocol,
+    },
+    upgrade::{InboundUpgradeSend, OutboundUpgradeSend},
+    StreamUpgradeError,
+};
 
 /// A [`ConnectionHandler`] that opens a new substream for each request.
 // TODO: Debug
@@ -36,16 +44,12 @@ where
 {
     /// The upgrade for inbound substreams.
     listen_protocol: SubstreamProtocol<TInbound, ()>,
-    /// If `Some`, something bad happened and we should shut down the handler with an error.
-    pending_error: Option<ConnectionHandlerUpgrErr<<TOutbound as OutboundUpgradeSend>::Error>>,
     /// Queue of events to produce in `poll()`.
-    events_out: SmallVec<[TEvent; 4]>,
+    events_out: SmallVec<[Result<TEvent, StreamUpgradeError<TOutbound::Error>>; 4]>,
     /// Queue of outbound substreams to open.
     dial_queue: SmallVec<[TOutbound; 4]>,
     /// Current number of concurrent outbound substreams being opened.
     dial_negotiated: u32,
-    /// Value to return from `connection_keep_alive`.
-    keep_alive: KeepAlive,
     /// The configuration container for the handler
     config: OneShotHandlerConfig,
 }
@@ -61,11 +65,9 @@ where
     ) -> Self {
         OneShotHandler {
             listen_protocol,
-            pending_error: None,
             events_out: SmallVec::new(),
             dial_queue: SmallVec::new(),
             dial_negotiated: 0,
-            keep_alive: KeepAlive::Yes,
             config,
         }
     }
@@ -78,7 +80,7 @@ where
     /// Returns a reference to the listen protocol configuration.
     ///
     /// > **Note**: If you modify the protocol, modifications will only applies to future inbound
-    /// >           substreams, not the ones already being negotiated.
+    /// > substreams, not the ones already being negotiated.
     pub fn listen_protocol_ref(&self) -> &SubstreamProtocol<TInbound, ()> {
         &self.listen_protocol
     }
@@ -86,14 +88,13 @@ where
     /// Returns a mutable reference to the listen protocol configuration.
     ///
     /// > **Note**: If you modify the protocol, modifications will only applies to future inbound
-    /// >           substreams, not the ones already being negotiated.
+    /// > substreams, not the ones already being negotiated.
     pub fn listen_protocol_mut(&mut self) -> &mut SubstreamProtocol<TInbound, ()> {
         &mut self.listen_protocol
     }
 
     /// Opens an outbound substream with `upgrade`.
     pub fn send_request(&mut self, upgrade: TOutbound) {
-        self.keep_alive = KeepAlive::Yes;
         self.dial_queue.push(upgrade);
     }
 }
@@ -121,43 +122,29 @@ where
     SubstreamProtocol<TInbound, ()>: Clone,
     TEvent: Debug + Send + 'static,
 {
-    type InEvent = TOutbound;
-    type OutEvent = TEvent;
-    type Error = ConnectionHandlerUpgrErr<<Self::OutboundProtocol as OutboundUpgradeSend>::Error>;
+    type FromBehaviour = TOutbound;
+    type ToBehaviour = Result<TEvent, StreamUpgradeError<TOutbound::Error>>;
     type InboundProtocol = TInbound;
     type OutboundProtocol = TOutbound;
     type OutboundOpenInfo = ();
     type InboundOpenInfo = ();
 
-    fn listen_protocol(&self) -> SubstreamProtocol<Self::InboundProtocol, Self::InboundOpenInfo> {
+    fn listen_protocol(&self) -> SubstreamProtocol<Self::InboundProtocol> {
         self.listen_protocol.clone()
     }
 
-    fn on_behaviour_event(&mut self, event: Self::InEvent) {
+    fn on_behaviour_event(&mut self, event: Self::FromBehaviour) {
         self.send_request(event);
-    }
-
-    fn connection_keep_alive(&self) -> KeepAlive {
-        self.keep_alive
     }
 
     fn poll(
         &mut self,
         _: &mut Context<'_>,
-    ) -> Poll<
-        ConnectionHandlerEvent<
-            Self::OutboundProtocol,
-            Self::OutboundOpenInfo,
-            Self::OutEvent,
-            Self::Error,
-        >,
-    > {
-        if let Some(err) = self.pending_error.take() {
-            return Poll::Ready(ConnectionHandlerEvent::Close(err));
-        }
-
+    ) -> Poll<ConnectionHandlerEvent<Self::OutboundProtocol, (), Self::ToBehaviour>> {
         if !self.events_out.is_empty() {
-            return Poll::Ready(ConnectionHandlerEvent::Custom(self.events_out.remove(0)));
+            return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(
+                self.events_out.remove(0),
+            ));
         } else {
             self.events_out.shrink_to_fit();
         }
@@ -173,10 +160,6 @@ where
             }
         } else {
             self.dial_queue.shrink_to_fit();
-
-            if self.dial_negotiated == 0 && self.keep_alive.is_yes() {
-                self.keep_alive = KeepAlive::Until(Instant::now() + self.config.keep_alive_timeout);
-            }
         }
 
         Poll::Pending
@@ -184,39 +167,29 @@ where
 
     fn on_connection_event(
         &mut self,
-        event: ConnectionEvent<
-            Self::InboundProtocol,
-            Self::OutboundProtocol,
-            Self::InboundOpenInfo,
-            Self::OutboundOpenInfo,
-        >,
+        event: ConnectionEvent<Self::InboundProtocol, Self::OutboundProtocol>,
     ) {
         match event {
             ConnectionEvent::FullyNegotiatedInbound(FullyNegotiatedInbound {
                 protocol: out,
                 ..
             }) => {
-                // If we're shutting down the connection for inactivity, reset the timeout.
-                if !self.keep_alive.is_yes() {
-                    self.keep_alive =
-                        KeepAlive::Until(Instant::now() + self.config.keep_alive_timeout);
-                }
-
-                self.events_out.push(out.into());
+                self.events_out.push(Ok(out.into()));
             }
             ConnectionEvent::FullyNegotiatedOutbound(FullyNegotiatedOutbound {
                 protocol: out,
                 ..
             }) => {
                 self.dial_negotiated -= 1;
-                self.events_out.push(out.into());
+                self.events_out.push(Ok(out.into()));
             }
             ConnectionEvent::DialUpgradeError(DialUpgradeError { error, .. }) => {
-                if self.pending_error.is_none() {
-                    self.pending_error = Some(error);
-                }
+                self.events_out.push(Err(error));
             }
-            ConnectionEvent::AddressChange(_) | ConnectionEvent::ListenUpgradeError(_) => {}
+            ConnectionEvent::AddressChange(_)
+            | ConnectionEvent::ListenUpgradeError(_)
+            | ConnectionEvent::LocalProtocolsChange(_)
+            | ConnectionEvent::RemoteProtocolsChange(_) => {}
         }
     }
 }
@@ -224,8 +197,6 @@ where
 /// Configuration parameters for the `OneShotHandler`
 #[derive(Debug)]
 pub struct OneShotHandlerConfig {
-    /// Keep-alive timeout for idle connections.
-    pub keep_alive_timeout: Duration,
     /// Timeout for outbound substream upgrades.
     pub outbound_substream_timeout: Duration,
     /// Maximum number of concurrent outbound substreams being opened.
@@ -235,7 +206,6 @@ pub struct OneShotHandlerConfig {
 impl Default for OneShotHandlerConfig {
     fn default() -> Self {
         OneShotHandlerConfig {
-            keep_alive_timeout: Duration::from_secs(10),
             outbound_substream_timeout: Duration::from_secs(10),
             max_dial_negotiated: 8,
         }
@@ -244,16 +214,16 @@ impl Default for OneShotHandlerConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::convert::Infallible;
 
-    use futures::executor::block_on;
-    use futures::future::poll_fn;
+    use futures::{executor::block_on, future::poll_fn};
     use libp2p_core::upgrade::DeniedUpgrade;
-    use void::Void;
+
+    use super::*;
 
     #[test]
     fn do_not_keep_idle_connection_alive() {
-        let mut handler: OneShotHandler<_, DeniedUpgrade, Void> = OneShotHandler::new(
+        let mut handler: OneShotHandler<_, DeniedUpgrade, Infallible> = OneShotHandler::new(
             SubstreamProtocol::new(DeniedUpgrade {}, ()),
             Default::default(),
         );
@@ -264,9 +234,6 @@ mod tests {
             }
         }));
 
-        assert!(matches!(
-            handler.connection_keep_alive(),
-            KeepAlive::Until(_)
-        ));
+        assert!(!handler.connection_keep_alive());
     }
 }

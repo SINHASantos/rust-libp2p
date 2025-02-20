@@ -2,8 +2,8 @@
 name = "rw-stream-sink"
 edition = "2021"
 description = "Adaptator between Stream/Sink and AsyncRead/AsyncWrite"
-rust-version = "1.60.0"
-version = "0.3.0"
+rust-version = { workspace = true }
+version = "0.4.0"
 authors = ["Parity Technologies <admin@parity.io>"]
 license = "MIT"
 repository = "https://github.com/libp2p/rust-libp2p"
@@ -11,8 +11,8 @@ keywords = ["networking"]
 categories = ["network-programming", "asynchronous"]
 
 [dependencies]
-futures = "0.3.26"
-pin-project = "1.0.10"
+futures = { workspace = true }
+pin-project = "1.1.5"
 static_assertions = "1"
 
 [dev-dependencies]
@@ -22,5 +22,6 @@ async-std = "1.0"
 # More information: https://docs.rs/about/builds#cross-compiling
 [package.metadata.docs.rs]
 all-features = true
-rustdoc-args = ["--cfg", "docsrs"]
-rustc-args = ["--cfg", "docsrs"]
+
+[lints]
+workspace = true

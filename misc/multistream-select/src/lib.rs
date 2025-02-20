@@ -40,13 +40,12 @@
 //! echoing the same protocol) or reject (by responding with a message stating
 //! "not available"). If a suggested protocol is not available, the dialer may
 //! suggest another protocol. This process continues until a protocol is agreed upon,
-//! yielding a [`Negotiated`](self::Negotiated) stream, or the dialer has run out of
+//! yielding a [`Negotiated`] stream, or the dialer has run out of
 //! alternatives.
 //!
-//! See [`dialer_select_proto`](self::dialer_select_proto) and
-//! [`listener_select_proto`](self::listener_select_proto).
+//! See [`dialer_select_proto`] and [`listener_select_proto`].
 //!
-//! ## [`Negotiated`](self::Negotiated)
+//! ## [`Negotiated`]
 //!
 //! A `Negotiated` represents an I/O stream that has settled on a protocol
 //! to use. By default, with [`Version::V1`], protocol negotiation is always
@@ -55,7 +54,7 @@
 //! a variant [`Version::V1Lazy`] that permits 0-RTT negotiation if the
 //! dialer only supports a single protocol. In that case, when a dialer
 //! settles on a protocol to use, the [`DialerSelectFuture`] yields a
-//! [`Negotiated`](self::Negotiated) I/O stream before the negotiation
+//! [`Negotiated`] I/O stream before the negotiation
 //! data has been flushed. It is then expecting confirmation for that protocol
 //! as the first messages read from the stream. This behaviour allows the dialer
 //! to immediately send data relating to the negotiated protocol together with the
@@ -63,8 +62,7 @@
 //! multiple 0-RTT negotiations in sequence for different protocols layered on
 //! top of each other may trigger undesirable behaviour for a listener not
 //! supporting one of the intermediate protocols. See
-//! [`dialer_select_proto`](self::dialer_select_proto) and the documentation
-//! of [`Version::V1Lazy`] for further details.
+//! [`dialer_select_proto`] and the documentation of [`Version::V1Lazy`] for further details.
 //!
 //! ## Examples
 //!
@@ -72,20 +70,21 @@
 //!
 //! ```no_run
 //! use async_std::net::TcpStream;
-//! use multistream_select::{dialer_select_proto, Version};
 //! use futures::prelude::*;
+//! use multistream_select::{dialer_select_proto, Version};
 //!
 //! async_std::task::block_on(async move {
 //!     let socket = TcpStream::connect("127.0.0.1:10333").await.unwrap();
 //!
-//!     let protos = vec![b"/echo/1.0.0", b"/echo/2.5.0"];
-//!     let (protocol, _io) = dialer_select_proto(socket, protos, Version::V1).await.unwrap();
+//!     let protos = vec!["/echo/1.0.0", "/echo/2.5.0"];
+//!     let (protocol, _io) = dialer_select_proto(socket, protos, Version::V1)
+//!         .await
+//!         .unwrap();
 //!
 //!     println!("Negotiated protocol: {:?}", protocol);
 //!     // You can now use `_io` to communicate with the remote.
 //! });
 //! ```
-//!
 
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
@@ -95,18 +94,21 @@ mod listener_select;
 mod negotiated;
 mod protocol;
 
-pub use self::dialer_select::{dialer_select_proto, DialerSelectFuture};
-pub use self::listener_select::{listener_select_proto, ListenerSelectFuture};
-pub use self::negotiated::{Negotiated, NegotiatedComplete, NegotiationError};
-pub use self::protocol::ProtocolError;
+pub use self::{
+    dialer_select::{dialer_select_proto, DialerSelectFuture},
+    listener_select::{listener_select_proto, ListenerSelectFuture},
+    negotiated::{Negotiated, NegotiatedComplete, NegotiationError},
+    protocol::ProtocolError,
+};
 
 /// Supported multistream-select versions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Version {
     /// Version 1 of the multistream-select protocol. See [1] and [2].
     ///
     /// [1]: https://github.com/libp2p/specs/blob/master/connections/README.md#protocol-negotiation
     /// [2]: https://github.com/multiformats/multistream-select
+    #[default]
     V1,
     /// A "lazy" variant of version 1 that is identical on the wire but whereby
     /// the dialer delays flushing protocol negotiation data in order to combine
@@ -142,8 +144,10 @@ pub enum Version {
     // V2,
 }
 
-impl Default for Version {
-    fn default() -> Self {
-        Version::V1
+#[cfg(test)]
+impl quickcheck::Arbitrary for Version {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+        *g.choose(&[Version::V1, Version::V1Lazy])
+            .expect("slice not empty")
     }
 }
