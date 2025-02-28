@@ -20,11 +20,10 @@
 
 //! libp2p is a modular peer-to-peer networking framework.
 //!
-//! To learn more about the general libp2p multi-language framework visit
-//! [libp2p.io](https://libp2p.io/).
+//! To learn more about the general libp2p multi-language framework visit <https://libp2p.io>.
 //!
 //! To get started with this libp2p implementation in Rust, please take a look
-//! at the [`tutorials`](crate::tutorials). Further examples can be found in the
+//! at the [`tutorials`]. Further examples can be found in the
 //! [examples] directory.
 //!
 //! [examples]: https://github.com/libp2p/rust-libp2p/tree/master/examples
@@ -36,32 +35,28 @@
 pub use bytes;
 pub use futures;
 #[doc(inline)]
-pub use libp2p_core::multihash;
-#[doc(inline)]
-pub use multiaddr;
-
+pub use libp2p_allow_block_list as allow_block_list;
 #[cfg(feature = "autonat")]
 #[doc(inline)]
 pub use libp2p_autonat as autonat;
 #[doc(inline)]
+pub use libp2p_connection_limits as connection_limits;
+#[doc(inline)]
 pub use libp2p_core as core;
+#[doc(inline)]
+pub use libp2p_core::multihash;
 #[cfg(feature = "dcutr")]
 #[doc(inline)]
 pub use libp2p_dcutr as dcutr;
-#[cfg(feature = "deflate")]
-#[cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))]
-#[doc(inline)]
-pub use libp2p_deflate as deflate;
 #[cfg(feature = "dns")]
 #[cfg_attr(docsrs, doc(cfg(feature = "dns")))]
-#[cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))]
+#[cfg(not(target_arch = "wasm32"))]
 #[doc(inline)]
 pub use libp2p_dns as dns;
 #[cfg(feature = "floodsub")]
 #[doc(inline)]
 pub use libp2p_floodsub as floodsub;
 #[cfg(feature = "gossipsub")]
-#[cfg(not(target_os = "unknown"))]
 #[doc(inline)]
 pub use libp2p_gossipsub as gossipsub;
 #[cfg(feature = "identify")]
@@ -71,16 +66,18 @@ pub use libp2p_identify as identify;
 #[doc(inline)]
 pub use libp2p_kad as kad;
 #[cfg(feature = "mdns")]
-#[cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))]
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "mdns")))]
 #[doc(inline)]
 pub use libp2p_mdns as mdns;
+#[cfg(feature = "memory-connection-limits")]
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "memory-connection-limits")))]
+#[doc(inline)]
+pub use libp2p_memory_connection_limits as memory_connection_limits;
 #[cfg(feature = "metrics")]
 #[doc(inline)]
 pub use libp2p_metrics as metrics;
-#[cfg(feature = "mplex")]
-#[doc(inline)]
-pub use libp2p_mplex as mplex;
 #[cfg(feature = "noise")]
 #[doc(inline)]
 pub use libp2p_noise as noise;
@@ -94,8 +91,7 @@ pub use libp2p_plaintext as plaintext;
 #[doc(inline)]
 pub use libp2p_pnet as pnet;
 #[cfg(feature = "quic")]
-#[cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))]
-#[doc(inline)]
+#[cfg(not(target_arch = "wasm32"))]
 pub use libp2p_quic as quic;
 #[cfg(feature = "relay")]
 #[doc(inline)]
@@ -109,36 +105,45 @@ pub use libp2p_request_response as request_response;
 #[doc(inline)]
 pub use libp2p_swarm as swarm;
 #[cfg(feature = "tcp")]
-#[cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))]
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(docsrs, doc(cfg(feature = "tcp")))]
 #[doc(inline)]
 pub use libp2p_tcp as tcp;
 #[cfg(feature = "tls")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
-#[cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))]
+#[cfg(not(target_arch = "wasm32"))]
 #[doc(inline)]
 pub use libp2p_tls as tls;
 #[cfg(feature = "uds")]
 #[cfg_attr(docsrs, doc(cfg(feature = "uds")))]
-#[cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))]
+#[cfg(not(target_arch = "wasm32"))]
 #[doc(inline)]
 pub use libp2p_uds as uds;
-#[cfg(feature = "wasm-ext")]
+#[cfg(feature = "upnp")]
+#[cfg(not(target_arch = "wasm32"))]
 #[doc(inline)]
-pub use libp2p_wasm_ext as wasm_ext;
-#[cfg(feature = "webrtc")]
-#[cfg_attr(docsrs, doc(cfg(feature = "webrtc")))]
-#[cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))]
+pub use libp2p_upnp as upnp;
+#[cfg(all(feature = "webrtc-websys", target_arch = "wasm32"))]
 #[doc(inline)]
-pub use libp2p_webrtc as webrtc;
+pub use libp2p_webrtc_websys as webrtc_websys;
 #[cfg(feature = "websocket")]
-#[cfg(not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")))]
+#[cfg(not(target_arch = "wasm32"))]
 #[doc(inline)]
 pub use libp2p_websocket as websocket;
+#[cfg(all(feature = "websocket-websys", target_arch = "wasm32"))]
+#[doc(inline)]
+pub use libp2p_websocket_websys as websocket_websys;
+#[cfg(all(feature = "webtransport-websys", target_arch = "wasm32"))]
+#[cfg_attr(docsrs, doc(cfg(feature = "webtransport-websys")))]
+#[doc(inline)]
+pub use libp2p_webtransport_websys as webtransport_websys;
 #[cfg(feature = "yamux")]
 #[doc(inline)]
 pub use libp2p_yamux as yamux;
+#[doc(inline)]
+pub use multiaddr;
 
+mod builder;
 mod transport_ext;
 
 pub mod bandwidth;
@@ -146,128 +151,23 @@ pub mod bandwidth;
 #[cfg(doc)]
 pub mod tutorials;
 
-pub use self::core::{
-    identity,
-    transport::TransportError,
-    upgrade::{InboundUpgrade, InboundUpgradeExt, OutboundUpgrade, OutboundUpgradeExt},
-    PeerId, Transport,
+#[cfg(all(not(target_arch = "wasm32"), feature = "websocket"))]
+pub use builder::WebsocketError as WebsocketBuilderError;
+pub use libp2p_identity as identity;
+pub use libp2p_identity::PeerId;
+pub use libp2p_swarm::{Stream, StreamProtocol};
+
+pub use self::{
+    builder::{
+        BehaviourError as BehaviourBuilderError, SwarmBuilder,
+        TransportError as TransportBuilderError,
+    },
+    core::{
+        transport::TransportError,
+        upgrade::{InboundUpgrade, OutboundUpgrade},
+        Transport,
+    },
+    multiaddr::{multiaddr as build_multiaddr, Multiaddr},
+    swarm::Swarm,
+    transport_ext::TransportExt,
 };
-pub use self::multiaddr::{multiaddr as build_multiaddr, Multiaddr};
-pub use self::swarm::Swarm;
-pub use self::transport_ext::TransportExt;
-
-/// Builds a `Transport` based on TCP/IP that supports the most commonly-used features of libp2p:
-///
-///  * DNS resolution.
-///  * Noise protocol encryption.
-///  * Websockets.
-///  * Both Yamux and Mplex for substream multiplexing.
-///
-/// All async I/O of the transport is based on `async-std`.
-///
-/// > **Note**: This `Transport` is not suitable for production usage, as its implementation
-/// >           reserves the right to support additional protocols or remove deprecated protocols.
-#[cfg(all(
-    not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")),
-    any(
-        all(feature = "tcp-async-io", feature = "dns-async-std"),
-        all(feature = "tcp", feature = "dns", feature = "async-std")
-    ),
-    feature = "websocket",
-    feature = "noise",
-    feature = "mplex",
-    feature = "yamux"
-))]
-#[cfg_attr(
-    all(
-        any(feature = "tcp-async-io", feature = "dns-async-std"),
-        not(feature = "async-std")
-    ),
-    deprecated(
-        since = "0.49.0",
-        note = "The `tcp-async-io` and `dns-async-std` features are deprecated. Use the new `tcp` and `dns` features together with the `async-std` feature."
-    )
-)]
-pub async fn development_transport(
-    keypair: identity::Keypair,
-) -> std::io::Result<core::transport::Boxed<(PeerId, core::muxing::StreamMuxerBox)>> {
-    let transport = {
-        let dns_tcp = dns::DnsConfig::system(tcp::async_io::Transport::new(
-            tcp::Config::new().nodelay(true),
-        ))
-        .await?;
-        let ws_dns_tcp = websocket::WsConfig::new(
-            dns::DnsConfig::system(tcp::async_io::Transport::new(
-                tcp::Config::new().nodelay(true),
-            ))
-            .await?,
-        );
-        dns_tcp.or_transport(ws_dns_tcp)
-    };
-
-    Ok(transport
-        .upgrade(core::upgrade::Version::V1)
-        .authenticate(noise::NoiseAuthenticated::xx(&keypair).unwrap())
-        .multiplex(core::upgrade::SelectUpgrade::new(
-            yamux::YamuxConfig::default(),
-            mplex::MplexConfig::default(),
-        ))
-        .timeout(std::time::Duration::from_secs(20))
-        .boxed())
-}
-
-/// Builds a `Transport` based on TCP/IP that supports the most commonly-used features of libp2p:
-///
-///  * DNS resolution.
-///  * Noise protocol encryption.
-///  * Websockets.
-///  * Both Yamux and Mplex for substream multiplexing.
-///
-/// All async I/O of the transport is based on `tokio`.
-///
-/// > **Note**: This `Transport` is not suitable for production usage, as its implementation
-/// >           reserves the right to support additional protocols or remove deprecated protocols.
-#[cfg(all(
-    not(any(target_os = "emscripten", target_os = "wasi", target_os = "unknown")),
-    any(
-        all(feature = "tcp-tokio", feature = "dns-tokio"),
-        all(feature = "tcp", feature = "dns", feature = "tokio")
-    ),
-    feature = "websocket",
-    feature = "noise",
-    feature = "mplex",
-    feature = "yamux"
-))]
-#[cfg_attr(
-    all(
-        any(feature = "tcp-tokio", feature = "dns-tokio"),
-        not(feature = "tokio")
-    ),
-    deprecated(
-        since = "0.49.0",
-        note = "The `tcp-tokio` and `dns-tokio` features are deprecated. Use the new `tcp` and `dns` feature together with the `tokio` feature."
-    )
-)]
-pub fn tokio_development_transport(
-    keypair: identity::Keypair,
-) -> std::io::Result<core::transport::Boxed<(PeerId, core::muxing::StreamMuxerBox)>> {
-    let transport = {
-        let dns_tcp = dns::TokioDnsConfig::system(tcp::tokio::Transport::new(
-            tcp::Config::new().nodelay(true),
-        ))?;
-        let ws_dns_tcp = websocket::WsConfig::new(dns::TokioDnsConfig::system(
-            tcp::tokio::Transport::new(tcp::Config::new().nodelay(true)),
-        )?);
-        dns_tcp.or_transport(ws_dns_tcp)
-    };
-
-    Ok(transport
-        .upgrade(core::upgrade::Version::V1)
-        .authenticate(noise::NoiseAuthenticated::xx(&keypair).unwrap())
-        .multiplex(core::upgrade::SelectUpgrade::new(
-            yamux::YamuxConfig::default(),
-            mplex::MplexConfig::default(),
-        ))
-        .timeout(std::time::Duration::from_secs(20))
-        .boxed())
-}

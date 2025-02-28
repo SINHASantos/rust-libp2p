@@ -18,10 +18,16 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::transport::{ListenerId, Transport, TransportError, TransportEvent};
+use std::{
+    error,
+    pin::Pin,
+    task::{Context, Poll},
+};
+
 use futures::prelude::*;
 use multiaddr::Multiaddr;
-use std::{error, pin::Pin, task::Context, task::Poll};
+
+use crate::transport::{DialOpts, ListenerId, Transport, TransportError, TransportEvent};
 
 /// See `Transport::map_err`.
 #[derive(Debug, Copy, Clone)]
@@ -50,42 +56,34 @@ where
     type ListenerUpgrade = MapErrListenerUpgrade<T, F>;
     type Dial = MapErrDial<T, F>;
 
-    fn listen_on(&mut self, addr: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
+    fn listen_on(
+        &mut self,
+        id: ListenerId,
+        addr: Multiaddr,
+    ) -> Result<(), TransportError<Self::Error>> {
         let map = self.map.clone();
-        self.transport.listen_on(addr).map_err(|err| err.map(map))
+        self.transport
+            .listen_on(id, addr)
+            .map_err(|err| err.map(map))
     }
 
     fn remove_listener(&mut self, id: ListenerId) -> bool {
         self.transport.remove_listener(id)
     }
 
-    fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
-        let map = self.map.clone();
-        match self.transport.dial(addr) {
-            Ok(future) => Ok(MapErrDial {
-                inner: future,
-                map: Some(map),
-            }),
-            Err(err) => Err(err.map(map)),
-        }
-    }
-
-    fn dial_as_listener(
+    fn dial(
         &mut self,
         addr: Multiaddr,
+        opts: DialOpts,
     ) -> Result<Self::Dial, TransportError<Self::Error>> {
         let map = self.map.clone();
-        match self.transport.dial_as_listener(addr) {
+        match self.transport.dial(addr, opts) {
             Ok(future) => Ok(MapErrDial {
                 inner: future,
                 map: Some(map),
             }),
             Err(err) => Err(err.map(map)),
         }
-    }
-
-    fn address_translation(&self, server: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
-        self.transport.address_translation(server, observed)
     }
 
     fn poll(

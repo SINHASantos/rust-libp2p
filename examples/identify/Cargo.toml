@@ -1,12 +1,18 @@
 [package]
-name = "identify"
+name = "identify-example"
 version = "0.1.0"
 edition = "2021"
 publish = false
 license = "MIT"
 
+[package.metadata.release]
+release = false
+
 [dependencies]
-async-std = { version = "1.12", features = ["attributes"] }
-async-trait = "0.1"
-futures = "0.3.26"
-libp2p = { path = "../../libp2p", features = ["async-std", "dns", "dcutr", "identify", "macros", "mplex", "noise", "ping", "relay", "rendezvous", "tcp", "tokio", "yamux"] }
+tokio = { version = "1.37.0", features = ["full"] }
+futures = { workspace = true }
+libp2p = { path = "../../libp2p", features = ["identify", "noise", "tcp", "tokio", "yamux"] }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[lints]
+workspace = true

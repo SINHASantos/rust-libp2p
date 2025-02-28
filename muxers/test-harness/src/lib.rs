@@ -1,61 +1,53 @@
-use crate::future::{BoxFuture, Either, FutureExt};
-use futures::{future, AsyncRead, AsyncWrite};
-use futures::{AsyncReadExt, Stream};
-use futures::{AsyncWriteExt, StreamExt};
-use libp2p_core::multiaddr::Protocol;
-use libp2p_core::muxing::StreamMuxerExt;
-use libp2p_core::transport::memory::Channel;
-use libp2p_core::transport::MemoryTransport;
-use libp2p_core::{
-    upgrade, InboundUpgrade, Negotiated, OutboundUpgrade, StreamMuxer, Transport, UpgradeInfo,
+use std::{
+    fmt,
+    future::Future,
+    mem,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
 };
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-use std::time::Duration;
-use std::{fmt, mem};
 
-pub async fn connected_muxers_on_memory_transport<MC, M, E>() -> (M, M)
+use futures::{future, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, Stream, StreamExt};
+use libp2p_core::{
+    muxing::StreamMuxerExt,
+    upgrade::{InboundConnectionUpgrade, OutboundConnectionUpgrade},
+    StreamMuxer, UpgradeInfo,
+};
+
+use crate::future::{BoxFuture, Either, FutureExt};
+
+pub async fn connected_muxers_on_memory_ring_buffer<MC, M, E>() -> (M, M)
 where
-    MC: InboundUpgrade<Negotiated<Channel<Vec<u8>>>, Error = E, Output = M>
-        + OutboundUpgrade<Negotiated<Channel<Vec<u8>>>, Error = E, Output = M>
+    MC: InboundConnectionUpgrade<futures_ringbuf::Endpoint, Error = E, Output = M>
+        + OutboundConnectionUpgrade<futures_ringbuf::Endpoint, Error = E, Output = M>
         + Send
         + 'static
         + Default,
     <MC as UpgradeInfo>::Info: Send,
     <<MC as UpgradeInfo>::InfoIter as IntoIterator>::IntoIter: Send,
-    <MC as InboundUpgrade<Negotiated<Channel<Vec<u8>>>>>::Future: Send,
-    <MC as OutboundUpgrade<Negotiated<Channel<Vec<u8>>>>>::Future: Send,
+    <MC as InboundConnectionUpgrade<futures_ringbuf::Endpoint>>::Future: Send,
+    <MC as OutboundConnectionUpgrade<futures_ringbuf::Endpoint>>::Future: Send,
     E: std::error::Error + Send + Sync + 'static,
 {
-    let mut alice = MemoryTransport::default()
-        .and_then(move |c, e| upgrade::apply(c, MC::default(), e, upgrade::Version::V1))
-        .boxed();
-    let mut bob = MemoryTransport::default()
-        .and_then(move |c, e| upgrade::apply(c, MC::default(), e, upgrade::Version::V1))
-        .boxed();
+    let (alice, bob) = futures_ringbuf::Endpoint::pair(100, 100);
 
-    alice.listen_on(Protocol::Memory(0).into()).unwrap();
-    let listen_address = alice.next().await.unwrap().into_new_address().unwrap();
+    let alice_upgrade = MC::default().upgrade_inbound(
+        alice,
+        MC::default().protocol_info().into_iter().next().unwrap(),
+    );
 
-    futures::future::join(
-        async {
-            alice
-                .next()
-                .await
-                .unwrap()
-                .into_incoming()
-                .unwrap()
-                .0
-                .await
-                .unwrap()
-        },
-        async { bob.dial(listen_address).unwrap().await.unwrap() },
-    )
-    .await
+    let bob_upgrade = MC::default().upgrade_outbound(
+        bob,
+        MC::default().protocol_info().into_iter().next().unwrap(),
+    );
+
+    futures::future::try_join(alice_upgrade, bob_upgrade)
+        .await
+        .unwrap()
 }
 
-/// Verifies that Alice can send a message and immediately close the stream afterwards and Bob can use `read_to_end` to read the entire message.
+/// Verifies that Alice can send a message and immediately close the stream afterwards and Bob can
+/// use `read_to_end` to read the entire message.
 pub async fn close_implies_flush<A, B, S, E>(alice: A, bob: B)
 where
     A: StreamMuxer<Substream = S, Error = E> + Unpin,
@@ -113,7 +105,8 @@ where
     .await;
 }
 
-/// Runs the given protocol between the two parties, ensuring commutativity, i.e. either party can be the dialer and listener.
+/// Runs the given protocol between the two parties, ensuring commutativity, i.e. either party can
+/// be the dialer and listener.
 async fn run_commutative<A, B, S, E, F1, F2>(
     mut alice: A,
     mut bob: B,
@@ -134,7 +127,8 @@ async fn run_commutative<A, B, S, E, F1, F2>(
 /// Runs a given protocol between the two parties.
 ///
 /// The first party will open a new substream and the second party will wait for this.
-/// The [`StreamMuxer`] is polled until both parties have completed the protocol to ensure that the underlying connection can make progress at all times.
+/// The [`StreamMuxer`] is polled until both parties have completed the protocol to ensure that the
+/// underlying connection can make progress at all times.
 async fn run<A, B, S, E, F1, F2>(
     dialer: &mut A,
     listener: &mut B,
@@ -163,20 +157,20 @@ async fn run<A, B, S, E, F1, F2>(
     loop {
         match futures::future::select(dialer.next(), listener.next()).await {
             Either::Left((Some(Event::SetupComplete), _)) => {
-                log::info!("Dialer opened outbound stream");
+                tracing::info!("Dialer opened outbound stream");
             }
             Either::Left((Some(Event::ProtocolComplete), _)) => {
-                log::info!("Dialer completed protocol");
+                tracing::info!("Dialer completed protocol");
                 dialer_complete = true
             }
             Either::Left((Some(Event::Timeout), _)) => {
                 panic!("Dialer protocol timed out");
             }
             Either::Right((Some(Event::SetupComplete), _)) => {
-                log::info!("Listener received inbound stream");
+                tracing::info!("Listener received inbound stream");
             }
             Either::Right((Some(Event::ProtocolComplete), _)) => {
-                log::info!("Listener completed protocol");
+                tracing::info!("Listener completed protocol");
                 listener_complete = true
             }
             Either::Right((Some(Event::Timeout), _)) => {
@@ -220,7 +214,7 @@ enum Event {
     ProtocolComplete,
 }
 
-impl<'m, M> Stream for Harness<'m, M>
+impl<M> Stream for Harness<'_, M>
 where
     M: StreamMuxer + Unpin,
 {

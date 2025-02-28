@@ -18,13 +18,8 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::core::muxing::{StreamMuxer, StreamMuxerEvent};
+#![allow(deprecated)]
 
-use futures::{
-    io::{IoSlice, IoSliceMut},
-    prelude::*,
-    ready,
-};
 use std::{
     convert::TryFrom as _,
     io,
@@ -35,6 +30,14 @@ use std::{
     },
     task::{Context, Poll},
 };
+
+use futures::{
+    io::{IoSlice, IoSliceMut},
+    prelude::*,
+    ready,
+};
+
+use crate::core::muxing::{StreamMuxer, StreamMuxerEvent};
 
 /// Wraps around a [`StreamMuxer`] and counts the number of bytes that go through all the opened
 /// streams.
@@ -101,6 +104,9 @@ where
 }
 
 /// Allows obtaining the average bandwidth of the streams.
+#[deprecated(
+    note = "Use `libp2p::SwarmBuilder::with_bandwidth_metrics` or `libp2p_metrics::BandwidthTransport` instead."
+)]
 pub struct BandwidthSinks {
     inbound: AtomicU64,
     outbound: AtomicU64,
@@ -118,7 +124,7 @@ impl BandwidthSinks {
     /// Returns the total number of bytes that have been downloaded on all the streams.
     ///
     /// > **Note**: This method is by design subject to race conditions. The returned value should
-    /// >           only ever be used for statistics purposes.
+    /// > only ever be used for statistics purposes.
     pub fn total_inbound(&self) -> u64 {
         self.inbound.load(Ordering::Relaxed)
     }
@@ -126,7 +132,7 @@ impl BandwidthSinks {
     /// Returns the total number of bytes that have been uploaded on all the streams.
     ///
     /// > **Note**: This method is by design subject to race conditions. The returned value should
-    /// >           only ever be used for statistics purposes.
+    /// > only ever be used for statistics purposes.
     pub fn total_outbound(&self) -> u64 {
         self.outbound.load(Ordering::Relaxed)
     }
@@ -149,7 +155,7 @@ impl<SMInner: AsyncRead> AsyncRead for InstrumentedStream<SMInner> {
         let this = self.project();
         let num_bytes = ready!(this.inner.poll_read(cx, buf))?;
         this.sinks.inbound.fetch_add(
-            u64::try_from(num_bytes).unwrap_or(u64::max_value()),
+            u64::try_from(num_bytes).unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
         Poll::Ready(Ok(num_bytes))
@@ -163,7 +169,7 @@ impl<SMInner: AsyncRead> AsyncRead for InstrumentedStream<SMInner> {
         let this = self.project();
         let num_bytes = ready!(this.inner.poll_read_vectored(cx, bufs))?;
         this.sinks.inbound.fetch_add(
-            u64::try_from(num_bytes).unwrap_or(u64::max_value()),
+            u64::try_from(num_bytes).unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
         Poll::Ready(Ok(num_bytes))
@@ -179,7 +185,7 @@ impl<SMInner: AsyncWrite> AsyncWrite for InstrumentedStream<SMInner> {
         let this = self.project();
         let num_bytes = ready!(this.inner.poll_write(cx, buf))?;
         this.sinks.outbound.fetch_add(
-            u64::try_from(num_bytes).unwrap_or(u64::max_value()),
+            u64::try_from(num_bytes).unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
         Poll::Ready(Ok(num_bytes))
@@ -193,7 +199,7 @@ impl<SMInner: AsyncWrite> AsyncWrite for InstrumentedStream<SMInner> {
         let this = self.project();
         let num_bytes = ready!(this.inner.poll_write_vectored(cx, bufs))?;
         this.sinks.outbound.fetch_add(
-            u64::try_from(num_bytes).unwrap_or(u64::max_value()),
+            u64::try_from(num_bytes).unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
         Poll::Ready(Ok(num_bytes))

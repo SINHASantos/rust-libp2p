@@ -18,121 +18,96 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::proto;
+use std::io;
+
 use asynchronous_codec::Framed;
-use futures::{future::BoxFuture, prelude::*};
-use libp2p_core::{multiaddr::Protocol, upgrade, Multiaddr};
-use libp2p_swarm::NegotiatedSubstream;
-use std::convert::TryFrom;
-use std::iter;
+use futures::prelude::*;
+use libp2p_core::{multiaddr::Protocol, Multiaddr};
+use libp2p_swarm::Stream;
 use thiserror::Error;
 
-pub struct Upgrade {}
+use crate::proto;
 
-impl upgrade::UpgradeInfo for Upgrade {
-    type Info = &'static [u8];
-    type InfoIter = iter::Once<Self::Info>;
+pub(crate) async fn handshake(
+    stream: Stream,
+    candidates: Vec<Multiaddr>,
+) -> Result<Vec<Multiaddr>, Error> {
+    let mut stream = Framed::new(
+        stream,
+        quick_protobuf_codec::Codec::new(super::MAX_MESSAGE_SIZE_BYTES),
+    );
 
-    fn protocol_info(&self) -> Self::InfoIter {
-        iter::once(super::PROTOCOL_NAME)
-    }
-}
+    let proto::HolePunch { type_pb, ObsAddrs } = stream
+        .next()
+        .await
+        .ok_or(io::Error::from(io::ErrorKind::UnexpectedEof))??;
 
-impl upgrade::InboundUpgrade<NegotiatedSubstream> for Upgrade {
-    type Output = PendingConnect;
-    type Error = UpgradeError;
-    type Future = BoxFuture<'static, Result<Self::Output, Self::Error>>;
+    if ObsAddrs.is_empty() {
+        return Err(Error::Protocol(ProtocolViolation::NoAddresses));
+    };
 
-    fn upgrade_inbound(self, substream: NegotiatedSubstream, _: Self::Info) -> Self::Future {
-        let mut substream = Framed::new(
-            substream,
-            quick_protobuf_codec::Codec::new(super::MAX_MESSAGE_SIZE_BYTES),
-        );
-
-        async move {
-            let proto::HolePunch { type_pb, ObsAddrs } =
-                substream.next().await.ok_or(UpgradeError::StreamClosed)??;
-
-            let obs_addrs = if ObsAddrs.is_empty() {
-                return Err(UpgradeError::NoAddresses);
-            } else {
-                ObsAddrs
-                    .into_iter()
-                    .filter_map(|a| match Multiaddr::try_from(a.to_vec()) {
-                        Ok(a) => Some(a),
-                        Err(e) => {
-                            log::debug!("Unable to parse multiaddr: {e}");
-                            None
-                        }
-                    })
-                    // Filter out relayed addresses.
-                    .filter(|a| {
-                        if a.iter().any(|p| p == Protocol::P2pCircuit) {
-                            log::debug!("Dropping relayed address {a}");
-                            false
-                        } else {
-                            true
-                        }
-                    })
-                    .collect::<Vec<Multiaddr>>()
-            };
-
-            match type_pb {
-                proto::Type::CONNECT => {}
-                proto::Type::SYNC => return Err(UpgradeError::UnexpectedTypeSync),
+    let obs_addrs = ObsAddrs
+        .into_iter()
+        .filter_map(|a| match Multiaddr::try_from(a.to_vec()) {
+            Ok(a) => Some(a),
+            Err(e) => {
+                tracing::debug!("Unable to parse multiaddr: {e}");
+                None
             }
+        })
+        // Filter out relayed addresses.
+        .filter(|a| {
+            if a.iter().any(|p| p == Protocol::P2pCircuit) {
+                tracing::debug!(address=%a, "Dropping relayed address");
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
 
-            Ok(PendingConnect {
-                substream,
-                remote_obs_addrs: obs_addrs,
-            })
-        }
-        .boxed()
+    if !matches!(type_pb, proto::Type::CONNECT) {
+        return Err(Error::Protocol(ProtocolViolation::UnexpectedTypeSync));
     }
+
+    let msg = proto::HolePunch {
+        type_pb: proto::Type::CONNECT,
+        ObsAddrs: candidates.into_iter().map(|a| a.to_vec()).collect(),
+    };
+
+    stream.send(msg).await?;
+    let proto::HolePunch { type_pb, .. } = stream
+        .next()
+        .await
+        .ok_or(io::Error::from(io::ErrorKind::UnexpectedEof))??;
+
+    if !matches!(type_pb, proto::Type::SYNC) {
+        return Err(Error::Protocol(ProtocolViolation::UnexpectedTypeConnect));
+    }
+
+    Ok(obs_addrs)
 }
 
-pub struct PendingConnect {
-    substream: Framed<NegotiatedSubstream, quick_protobuf_codec::Codec<proto::HolePunch>>,
-    remote_obs_addrs: Vec<Multiaddr>,
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("IO error")]
+    Io(#[from] io::Error),
+    #[error("Protocol error")]
+    Protocol(#[from] ProtocolViolation),
 }
 
-impl PendingConnect {
-    pub async fn accept(
-        mut self,
-        local_obs_addrs: Vec<Multiaddr>,
-    ) -> Result<Vec<Multiaddr>, UpgradeError> {
-        let msg = proto::HolePunch {
-            type_pb: proto::Type::CONNECT,
-            ObsAddrs: local_obs_addrs.into_iter().map(|a| a.to_vec()).collect(),
-        };
-
-        self.substream.send(msg).await?;
-        let proto::HolePunch { type_pb, .. } = self
-            .substream
-            .next()
-            .await
-            .ok_or(UpgradeError::StreamClosed)??;
-
-        match type_pb {
-            proto::Type::CONNECT => return Err(UpgradeError::UnexpectedTypeConnect),
-            proto::Type::SYNC => {}
-        }
-
-        Ok(self.remote_obs_addrs)
+impl From<quick_protobuf_codec::Error> for Error {
+    fn from(e: quick_protobuf_codec::Error) -> Self {
+        Error::Protocol(ProtocolViolation::Codec(e))
     }
 }
 
 #[derive(Debug, Error)]
-pub enum UpgradeError {
+pub enum ProtocolViolation {
     #[error(transparent)]
     Codec(#[from] quick_protobuf_codec::Error),
-    #[error("Stream closed")]
-    StreamClosed,
     #[error("Expected at least one address in reservation.")]
     NoAddresses,
-    #[deprecated(since = "0.8.1", note = "Error is no longer constructed.")]
-    #[error("Invalid addresses.")]
-    InvalidAddrs,
     #[error("Failed to parse response type field.")]
     ParseTypeField,
     #[error("Unexpected message type 'connect'")]

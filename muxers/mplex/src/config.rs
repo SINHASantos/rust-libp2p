@@ -18,14 +18,15 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::codec::MAX_FRAME_SIZE;
 use std::cmp;
 
-pub(crate) const DEFAULT_MPLEX_PROTOCOL_NAME: &[u8] = b"/mplex/6.7.0";
+use crate::codec::MAX_FRAME_SIZE;
+
+pub(crate) const DEFAULT_MPLEX_PROTOCOL_NAME: &str = "/mplex/6.7.0";
 
 /// Configuration for the multiplexer.
 #[derive(Debug, Clone)]
-pub struct MplexConfig {
+pub struct Config {
     /// Maximum number of simultaneously used substreams.
     pub(crate) max_substreams: usize,
     /// Maximum number of frames buffered per substream.
@@ -36,12 +37,12 @@ pub struct MplexConfig {
     /// (max 1MByte, as per the Mplex spec).
     pub(crate) split_send_size: usize,
     /// Protocol name, defaults to b"/mplex/6.7.0"
-    pub(crate) protocol_name: &'static [u8],
+    pub(crate) protocol_name: &'static str,
 }
 
-impl MplexConfig {
+impl Config {
     /// Builds the default configuration.
-    pub fn new() -> MplexConfig {
+    pub fn new() -> Config {
         Default::default()
     }
 
@@ -94,9 +95,9 @@ impl MplexConfig {
     /// ```rust
     /// use libp2p_mplex::MplexConfig;
     /// let mut muxer_config = MplexConfig::new();
-    /// muxer_config.set_protocol_name(b"/mplex/6.7.0");
+    /// muxer_config.set_protocol_name("/mplex/6.7.0");
     /// ```
-    pub fn set_protocol_name(&mut self, protocol_name: &'static [u8]) -> &mut Self {
+    pub fn set_protocol_name(&mut self, protocol_name: &'static str) -> &mut Self {
         self.protocol_name = protocol_name;
         self
     }
@@ -107,7 +108,7 @@ impl MplexConfig {
 pub enum MaxBufferBehaviour {
     /// Reset the substream whose frame buffer overflowed.
     ///
-    /// > **Note**: If more than [`MplexConfig::set_max_buffer_size()`] frames
+    /// > **Note**: If more than [`Config::set_max_buffer_size()`] frames
     /// > are received in succession for a substream in the context of
     /// > trying to read data from a different substream, the former substream
     /// > may be reset before application code had a chance to read from the
@@ -129,9 +130,9 @@ pub enum MaxBufferBehaviour {
     Block,
 }
 
-impl Default for MplexConfig {
-    fn default() -> MplexConfig {
-        MplexConfig {
+impl Default for Config {
+    fn default() -> Config {
+        Config {
             max_substreams: 128,
             max_buffer_len: 32,
             max_buffer_behaviour: MaxBufferBehaviour::Block,

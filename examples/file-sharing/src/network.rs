@@ -1,36 +1,33 @@
-use async_std::io;
-use async_trait::async_trait;
-use either::Either;
-use futures::channel::{mpsc, oneshot};
-use futures::prelude::*;
-
-use libp2p::{
-    core::{
-        upgrade::{read_length_prefixed, write_length_prefixed, ProtocolName},
-        Multiaddr, PeerId,
-    },
-    identity,
-    kad::{
-        record::store::MemoryStore, GetProvidersOk, Kademlia, KademliaEvent, QueryId, QueryResult,
-    },
-    multiaddr::Protocol,
-    request_response::{self, ProtocolSupport, RequestId, ResponseChannel},
-    swarm::{ConnectionHandlerUpgrErr, NetworkBehaviour, Swarm, SwarmEvent},
+use std::{
+    collections::{hash_map, HashMap, HashSet},
+    error::Error,
+    time::Duration,
 };
 
-use std::collections::{hash_map, HashMap, HashSet};
-use std::error::Error;
-use std::iter;
+use futures::{
+    channel::{mpsc, oneshot},
+    prelude::*,
+    StreamExt,
+};
+use libp2p::{
+    core::Multiaddr,
+    identity, kad,
+    multiaddr::Protocol,
+    noise,
+    request_response::{self, OutboundRequestId, ProtocolSupport, ResponseChannel},
+    swarm::{NetworkBehaviour, Swarm, SwarmEvent},
+    tcp, yamux, PeerId, StreamProtocol,
+};
+use serde::{Deserialize, Serialize};
 
 /// Creates the network components, namely:
 ///
-/// - The network client to interact with the network layer from anywhere
-///   within your application.
+/// - The network client to interact with the network layer from anywhere within your application.
 ///
 /// - The network event stream, e.g. for incoming requests.
 ///
 /// - The network task driving the network itself.
-pub async fn new(
+pub(crate) async fn new(
     secret_key_seed: Option<u8>,
 ) -> Result<(Client, impl Stream<Item = Event>, EventLoop), Box<dyn Error>> {
     // Create a public/private key pair, either random or based on a seed.
@@ -38,29 +35,39 @@ pub async fn new(
         Some(seed) => {
             let mut bytes = [0u8; 32];
             bytes[0] = seed;
-            let secret_key = identity::ed25519::SecretKey::from_bytes(&mut bytes).expect(
-                "this returns `Err` only if the length is wrong; the length is correct; qed",
-            );
-            identity::Keypair::Ed25519(secret_key.into())
+            identity::Keypair::ed25519_from_bytes(bytes).unwrap()
         }
         None => identity::Keypair::generate_ed25519(),
     };
     let peer_id = id_keys.public().to_peer_id();
 
-    // Build the Swarm, connecting the lower layer transport logic with the
-    // higher layer network behaviour logic.
-    let swarm = Swarm::with_threadpool_executor(
-        libp2p::development_transport(id_keys).await?,
-        ComposedBehaviour {
-            kademlia: Kademlia::new(peer_id, MemoryStore::new(peer_id)),
-            request_response: request_response::Behaviour::new(
-                FileExchangeCodec(),
-                iter::once((FileExchangeProtocol(), ProtocolSupport::Full)),
-                Default::default(),
+    let mut swarm = libp2p::SwarmBuilder::with_existing_identity(id_keys)
+        .with_tokio()
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )?
+        .with_behaviour(|key| Behaviour {
+            kademlia: kad::Behaviour::new(
+                peer_id,
+                kad::store::MemoryStore::new(key.public().to_peer_id()),
             ),
-        },
-        peer_id,
-    );
+            request_response: request_response::cbor::Behaviour::new(
+                [(
+                    StreamProtocol::new("/file-exchange/1"),
+                    ProtocolSupport::Full,
+                )],
+                request_response::Config::default(),
+            ),
+        })?
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
+        .build();
+
+    swarm
+        .behaviour_mut()
+        .kademlia
+        .set_mode(Some(kad::Mode::Server));
 
     let (command_sender, command_receiver) = mpsc::channel(0);
     let (event_sender, event_receiver) = mpsc::channel(0);
@@ -75,13 +82,16 @@ pub async fn new(
 }
 
 #[derive(Clone)]
-pub struct Client {
+pub(crate) struct Client {
     sender: mpsc::Sender<Command>,
 }
 
 impl Client {
     /// Listen for incoming connections on the given address.
-    pub async fn start_listening(&mut self, addr: Multiaddr) -> Result<(), Box<dyn Error + Send>> {
+    pub(crate) async fn start_listening(
+        &mut self,
+        addr: Multiaddr,
+    ) -> Result<(), Box<dyn Error + Send>> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Command::StartListening { addr, sender })
@@ -91,7 +101,7 @@ impl Client {
     }
 
     /// Dial the given peer at the given address.
-    pub async fn dial(
+    pub(crate) async fn dial(
         &mut self,
         peer_id: PeerId,
         peer_addr: Multiaddr,
@@ -109,7 +119,7 @@ impl Client {
     }
 
     /// Advertise the local node as the provider of the given file on the DHT.
-    pub async fn start_providing(&mut self, file_name: String) {
+    pub(crate) async fn start_providing(&mut self, file_name: String) {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Command::StartProviding { file_name, sender })
@@ -119,7 +129,7 @@ impl Client {
     }
 
     /// Find the providers for the given file on the DHT.
-    pub async fn get_providers(&mut self, file_name: String) -> HashSet<PeerId> {
+    pub(crate) async fn get_providers(&mut self, file_name: String) -> HashSet<PeerId> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Command::GetProviders { file_name, sender })
@@ -129,7 +139,7 @@ impl Client {
     }
 
     /// Request the content of the given file from the given peer.
-    pub async fn request_file(
+    pub(crate) async fn request_file(
         &mut self,
         peer: PeerId,
         file_name: String,
@@ -147,7 +157,11 @@ impl Client {
     }
 
     /// Respond with the provided file content to the given request.
-    pub async fn respond_file(&mut self, file: Vec<u8>, channel: ResponseChannel<FileResponse>) {
+    pub(crate) async fn respond_file(
+        &mut self,
+        file: Vec<u8>,
+        channel: ResponseChannel<FileResponse>,
+    ) {
         self.sender
             .send(Command::RespondFile { file, channel })
             .await
@@ -155,20 +169,20 @@ impl Client {
     }
 }
 
-pub struct EventLoop {
-    swarm: Swarm<ComposedBehaviour>,
+pub(crate) struct EventLoop {
+    swarm: Swarm<Behaviour>,
     command_receiver: mpsc::Receiver<Command>,
     event_sender: mpsc::Sender<Event>,
     pending_dial: HashMap<PeerId, oneshot::Sender<Result<(), Box<dyn Error + Send>>>>,
-    pending_start_providing: HashMap<QueryId, oneshot::Sender<()>>,
-    pending_get_providers: HashMap<QueryId, oneshot::Sender<HashSet<PeerId>>>,
+    pending_start_providing: HashMap<kad::QueryId, oneshot::Sender<()>>,
+    pending_get_providers: HashMap<kad::QueryId, oneshot::Sender<HashSet<PeerId>>>,
     pending_request_file:
-        HashMap<RequestId, oneshot::Sender<Result<Vec<u8>, Box<dyn Error + Send>>>>,
+        HashMap<OutboundRequestId, oneshot::Sender<Result<Vec<u8>, Box<dyn Error + Send>>>>,
 }
 
 impl EventLoop {
     fn new(
-        swarm: Swarm<ComposedBehaviour>,
+        swarm: Swarm<Behaviour>,
         command_receiver: mpsc::Receiver<Command>,
         event_sender: mpsc::Sender<Event>,
     ) -> Self {
@@ -183,10 +197,10 @@ impl EventLoop {
         }
     }
 
-    pub async fn run(mut self) {
+    pub(crate) async fn run(mut self) {
         loop {
-            futures::select! {
-                event = self.swarm.next() => self.handle_event(event.expect("Swarm stream to be infinite.")).await  ,
+            tokio::select! {
+                event = self.swarm.select_next_some() => self.handle_event(event).await,
                 command = self.command_receiver.next() => match command {
                     Some(c) => self.handle_command(c).await,
                     // Command channel closed, thus shutting down the network event loop.
@@ -196,15 +210,12 @@ impl EventLoop {
         }
     }
 
-    async fn handle_event(
-        &mut self,
-        event: SwarmEvent<ComposedEvent, Either<ConnectionHandlerUpgrErr<io::Error>, io::Error>>,
-    ) {
+    async fn handle_event(&mut self, event: SwarmEvent<BehaviourEvent>) {
         match event {
-            SwarmEvent::Behaviour(ComposedEvent::Kademlia(
-                KademliaEvent::OutboundQueryProgressed {
+            SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
+                kad::Event::OutboundQueryProgressed {
                     id,
-                    result: QueryResult::StartProviding(_),
+                    result: kad::QueryResult::StartProviding(_),
                     ..
                 },
             )) => {
@@ -214,12 +225,13 @@ impl EventLoop {
                     .expect("Completed query to be previously pending.");
                 let _ = sender.send(());
             }
-            SwarmEvent::Behaviour(ComposedEvent::Kademlia(
-                KademliaEvent::OutboundQueryProgressed {
+            SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
+                kad::Event::OutboundQueryProgressed {
                     id,
                     result:
-                        QueryResult::GetProviders(Ok(GetProvidersOk::FoundProviders {
-                            providers, ..
+                        kad::QueryResult::GetProviders(Ok(kad::GetProvidersOk::FoundProviders {
+                            providers,
+                            ..
                         })),
                     ..
                 },
@@ -236,17 +248,17 @@ impl EventLoop {
                         .finish();
                 }
             }
-            SwarmEvent::Behaviour(ComposedEvent::Kademlia(
-                KademliaEvent::OutboundQueryProgressed {
+            SwarmEvent::Behaviour(BehaviourEvent::Kademlia(
+                kad::Event::OutboundQueryProgressed {
                     result:
-                        QueryResult::GetProviders(Ok(GetProvidersOk::FinishedWithNoAdditionalRecord {
-                            ..
-                        })),
+                        kad::QueryResult::GetProviders(Ok(
+                            kad::GetProvidersOk::FinishedWithNoAdditionalRecord { .. },
+                        )),
                     ..
                 },
             )) => {}
-            SwarmEvent::Behaviour(ComposedEvent::Kademlia(_)) => {}
-            SwarmEvent::Behaviour(ComposedEvent::RequestResponse(
+            SwarmEvent::Behaviour(BehaviourEvent::Kademlia(_)) => {}
+            SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 request_response::Event::Message { message, .. },
             )) => match message {
                 request_response::Message::Request {
@@ -271,7 +283,7 @@ impl EventLoop {
                         .send(Ok(response.0));
                 }
             },
-            SwarmEvent::Behaviour(ComposedEvent::RequestResponse(
+            SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 request_response::Event::OutboundFailure {
                     request_id, error, ..
                 },
@@ -282,14 +294,14 @@ impl EventLoop {
                     .expect("Request to still be pending.")
                     .send(Err(Box::new(error)));
             }
-            SwarmEvent::Behaviour(ComposedEvent::RequestResponse(
+            SwarmEvent::Behaviour(BehaviourEvent::RequestResponse(
                 request_response::Event::ResponseSent { .. },
             )) => {}
             SwarmEvent::NewListenAddr { address, .. } => {
                 let local_peer_id = *self.swarm.local_peer_id();
                 eprintln!(
                     "Local node is listening on {:?}",
-                    address.with(Protocol::P2p(local_peer_id.into()))
+                    address.with(Protocol::P2p(local_peer_id))
                 );
             }
             SwarmEvent::IncomingConnection { .. } => {}
@@ -311,7 +323,10 @@ impl EventLoop {
                 }
             }
             SwarmEvent::IncomingConnectionError { .. } => {}
-            SwarmEvent::Dialing(peer_id) => eprintln!("Dialing {peer_id}"),
+            SwarmEvent::Dialing {
+                peer_id: Some(peer_id),
+                ..
+            } => eprintln!("Dialing {peer_id}"),
             e => panic!("{e:?}"),
         }
     }
@@ -334,10 +349,7 @@ impl EventLoop {
                         .behaviour_mut()
                         .kademlia
                         .add_address(&peer_id, peer_addr.clone());
-                    match self
-                        .swarm
-                        .dial(peer_addr.with(Protocol::P2p(peer_id.into())))
-                    {
+                    match self.swarm.dial(peer_addr.with(Protocol::P2p(peer_id))) {
                         Ok(()) => {
                             e.insert(sender);
                         }
@@ -390,28 +402,9 @@ impl EventLoop {
 }
 
 #[derive(NetworkBehaviour)]
-#[behaviour(out_event = "ComposedEvent")]
-struct ComposedBehaviour {
-    request_response: request_response::Behaviour<FileExchangeCodec>,
-    kademlia: Kademlia<MemoryStore>,
-}
-
-#[derive(Debug)]
-enum ComposedEvent {
-    RequestResponse(request_response::Event<FileRequest, FileResponse>),
-    Kademlia(KademliaEvent),
-}
-
-impl From<request_response::Event<FileRequest, FileResponse>> for ComposedEvent {
-    fn from(event: request_response::Event<FileRequest, FileResponse>) -> Self {
-        ComposedEvent::RequestResponse(event)
-    }
-}
-
-impl From<KademliaEvent> for ComposedEvent {
-    fn from(event: KademliaEvent) -> Self {
-        ComposedEvent::Kademlia(event)
-    }
+struct Behaviour {
+    request_response: request_response::cbor::Behaviour<FileRequest, FileResponse>,
+    kademlia: kad::Behaviour<kad::store::MemoryStore>,
 }
 
 #[derive(Debug)]
@@ -445,7 +438,7 @@ enum Command {
 }
 
 #[derive(Debug)]
-pub enum Event {
+pub(crate) enum Event {
     InboundRequest {
         request: String,
         channel: ResponseChannel<FileResponse>,
@@ -453,89 +446,7 @@ pub enum Event {
 }
 
 // Simple file exchange protocol
-
-#[derive(Debug, Clone)]
-struct FileExchangeProtocol();
-#[derive(Clone)]
-struct FileExchangeCodec();
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct FileRequest(String);
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileResponse(Vec<u8>);
-
-impl ProtocolName for FileExchangeProtocol {
-    fn protocol_name(&self) -> &[u8] {
-        "/file-exchange/1".as_bytes()
-    }
-}
-
-#[async_trait]
-impl request_response::Codec for FileExchangeCodec {
-    type Protocol = FileExchangeProtocol;
-    type Request = FileRequest;
-    type Response = FileResponse;
-
-    async fn read_request<T>(
-        &mut self,
-        _: &FileExchangeProtocol,
-        io: &mut T,
-    ) -> io::Result<Self::Request>
-    where
-        T: AsyncRead + Unpin + Send,
-    {
-        let vec = read_length_prefixed(io, 1_000_000).await?;
-
-        if vec.is_empty() {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-
-        Ok(FileRequest(String::from_utf8(vec).unwrap()))
-    }
-
-    async fn read_response<T>(
-        &mut self,
-        _: &FileExchangeProtocol,
-        io: &mut T,
-    ) -> io::Result<Self::Response>
-    where
-        T: AsyncRead + Unpin + Send,
-    {
-        let vec = read_length_prefixed(io, 500_000_000).await?; // update transfer maximum
-
-        if vec.is_empty() {
-            return Err(io::ErrorKind::UnexpectedEof.into());
-        }
-
-        Ok(FileResponse(vec))
-    }
-
-    async fn write_request<T>(
-        &mut self,
-        _: &FileExchangeProtocol,
-        io: &mut T,
-        FileRequest(data): FileRequest,
-    ) -> io::Result<()>
-    where
-        T: AsyncWrite + Unpin + Send,
-    {
-        write_length_prefixed(io, data).await?;
-        io.close().await?;
-
-        Ok(())
-    }
-
-    async fn write_response<T>(
-        &mut self,
-        _: &FileExchangeProtocol,
-        io: &mut T,
-        FileResponse(data): FileResponse,
-    ) -> io::Result<()>
-    where
-        T: AsyncWrite + Unpin + Send,
-    {
-        write_length_prefixed(io, data).await?;
-        io.close().await?;
-
-        Ok(())
-    }
-}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct FileResponse(Vec<u8>);

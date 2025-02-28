@@ -20,21 +20,24 @@
 
 //! Provides the `TransportExt` trait.
 
-use crate::core::{
-    muxing::{StreamMuxer, StreamMuxerBox},
-    transport::Boxed,
-    PeerId,
-};
+use std::sync::Arc;
+
+use libp2p_identity::PeerId;
+
+#[allow(deprecated)]
+use crate::bandwidth::{BandwidthLogging, BandwidthSinks};
 use crate::{
-    bandwidth::{BandwidthLogging, BandwidthSinks},
+    core::{
+        muxing::{StreamMuxer, StreamMuxerBox},
+        transport::Boxed,
+    },
     Transport,
 };
-use std::sync::Arc;
 
 /// Trait automatically implemented on all objects that implement `Transport`. Provides some
 /// additional utilities.
 pub trait TransportExt: Transport {
-    /// Adds a layer on the `Transport` that logs all trafic that passes through the streams
+    /// Adds a layer on the `Transport` that logs all traffic that passes through the streams
     /// created by it.
     ///
     /// This method returns an `Arc<BandwidthSinks>` that can be used to retrieve the total number
@@ -43,29 +46,27 @@ pub trait TransportExt: Transport {
     /// # Example
     ///
     /// ```
-    /// use libp2p_mplex as mplex;
+    /// use libp2p::{core::upgrade, identity, Transport, TransportExt};
     /// use libp2p_noise as noise;
     /// use libp2p_tcp as tcp;
-    /// use libp2p::{
-    ///     core::upgrade,
-    ///     identity,
-    ///     TransportExt,
-    ///     Transport,
-    /// };
+    /// use libp2p_yamux as yamux;
     ///
     /// let id_keys = identity::Keypair::generate_ed25519();
     ///
     /// let transport = tcp::tokio::Transport::new(tcp::Config::default().nodelay(true))
     ///     .upgrade(upgrade::Version::V1)
     ///     .authenticate(
-    ///         noise::NoiseAuthenticated::xx(&id_keys)
-    ///             .expect("Signing libp2p-noise static DH keypair failed."),
+    ///         noise::Config::new(&id_keys).expect("Signing libp2p-noise static DH keypair failed."),
     ///     )
-    ///     .multiplex(mplex::MplexConfig::new())
+    ///     .multiplex(yamux::Config::default())
     ///     .boxed();
     ///
     /// let (transport, sinks) = transport.with_bandwidth_logging();
     /// ```
+    #[allow(deprecated)]
+    #[deprecated(
+        note = "Use `libp2p::SwarmBuilder::with_bandwidth_metrics` or `libp2p_metrics::BandwidthTransport` instead."
+    )]
     fn with_bandwidth_logging<S>(self) -> (Boxed<(PeerId, StreamMuxerBox)>, Arc<BandwidthSinks>)
     where
         Self: Sized + Send + Unpin + 'static,

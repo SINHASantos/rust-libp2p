@@ -1,9 +1,6 @@
 use futures::{future, StreamExt};
-use libp2p_core::multiaddr::Protocol;
-use libp2p_core::transport::MemoryTransport;
-use libp2p_core::upgrade::Version;
-use libp2p_core::Transport;
-use libp2p_swarm::{keep_alive, Swarm, SwarmEvent};
+use libp2p_core::{multiaddr::Protocol, transport::MemoryTransport, upgrade::Version, Transport};
+use libp2p_swarm::{dummy, Config, Swarm, SwarmEvent};
 
 #[tokio::test]
 async fn can_establish_connection() {
@@ -55,18 +52,19 @@ async fn can_establish_connection() {
     assert_eq!(&outbound_peer_id, swarm1.local_peer_id());
 }
 
-fn make_swarm() -> Swarm<keep_alive::Behaviour> {
-    let identity = libp2p_core::identity::Keypair::generate_ed25519();
+fn make_swarm() -> Swarm<dummy::Behaviour> {
+    let identity = libp2p_identity::Keypair::generate_ed25519();
 
     let transport = MemoryTransport::default()
         .upgrade(Version::V1)
         .authenticate(libp2p_tls::Config::new(&identity).unwrap())
-        .multiplex(libp2p_yamux::YamuxConfig::default())
+        .multiplex(libp2p_yamux::Config::default())
         .boxed();
 
-    Swarm::without_executor(
+    Swarm::new(
         transport,
-        keep_alive::Behaviour,
+        dummy::Behaviour,
         identity.public().to_peer_id(),
+        Config::with_tokio_executor(),
     )
 }

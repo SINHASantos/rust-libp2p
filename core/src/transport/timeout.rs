@@ -24,13 +24,20 @@
 //! underlying `Transport`.
 // TODO: add example
 
-use crate::{
-    transport::{ListenerId, TransportError, TransportEvent},
-    Multiaddr, Transport,
+use std::{
+    error, fmt, io,
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
 };
+
 use futures::prelude::*;
 use futures_timer::Delay;
-use std::{error, fmt, io, pin::Pin, task::Context, task::Poll, time::Duration};
+
+use crate::{
+    transport::{DialOpts, ListenerId, TransportError, TransportEvent},
+    Multiaddr, Transport,
+};
 
 /// A `TransportTimeout` is a `Transport` that wraps another `Transport` and adds
 /// timeouts to all inbound and outbound connection attempts.
@@ -85,9 +92,13 @@ where
     type ListenerUpgrade = Timeout<InnerTrans::ListenerUpgrade>;
     type Dial = Timeout<InnerTrans::Dial>;
 
-    fn listen_on(&mut self, addr: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
+    fn listen_on(
+        &mut self,
+        id: ListenerId,
+        addr: Multiaddr,
+    ) -> Result<(), TransportError<Self::Error>> {
         self.inner
-            .listen_on(addr)
+            .listen_on(id, addr)
             .map_err(|err| err.map(TransportTimeoutError::Other))
     }
 
@@ -95,33 +106,19 @@ where
         self.inner.remove_listener(id)
     }
 
-    fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
-        let dial = self
-            .inner
-            .dial(addr)
-            .map_err(|err| err.map(TransportTimeoutError::Other))?;
-        Ok(Timeout {
-            inner: dial,
-            timer: Delay::new(self.outgoing_timeout),
-        })
-    }
-
-    fn dial_as_listener(
+    fn dial(
         &mut self,
         addr: Multiaddr,
+        opts: DialOpts,
     ) -> Result<Self::Dial, TransportError<Self::Error>> {
         let dial = self
             .inner
-            .dial_as_listener(addr)
+            .dial(addr, opts)
             .map_err(|err| err.map(TransportTimeoutError::Other))?;
         Ok(Timeout {
             inner: dial,
             timer: Delay::new(self.outgoing_timeout),
         })
-    }
-
-    fn address_translation(&self, server: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
-        self.inner.address_translation(server, observed)
     }
 
     fn poll(

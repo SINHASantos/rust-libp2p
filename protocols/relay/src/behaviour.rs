@@ -20,29 +20,32 @@
 
 //! [`NetworkBehaviour`] to act as a circuit relay v2 **relay**.
 
-mod handler;
-pub mod rate_limiter;
-
-use crate::behaviour::handler::Handler;
-use crate::multiaddr_ext::MultiaddrExt;
-use crate::proto;
-use crate::protocol::{inbound_hop, outbound_stop};
-use either::Either;
-use instant::Instant;
-use libp2p_core::multiaddr::Protocol;
-use libp2p_core::{ConnectedPoint, Endpoint, Multiaddr, PeerId};
-use libp2p_swarm::behaviour::{ConnectionClosed, FromSwarm};
-use libp2p_swarm::{
-    dummy, ConnectionDenied, ConnectionHandlerUpgrErr, ConnectionId, ExternalAddresses,
-    NetworkBehaviour, NetworkBehaviourAction, NotifyHandler, PollParameters, THandler,
-    THandlerInEvent, THandlerOutEvent,
+pub(crate) mod handler;
+pub(crate) mod rate_limiter;
+use std::{
+    collections::{hash_map, HashMap, HashSet, VecDeque},
+    num::NonZeroU32,
+    ops::Add,
+    task::{Context, Poll},
+    time::Duration,
 };
-use std::collections::{hash_map, HashMap, HashSet, VecDeque};
-use std::num::NonZeroU32;
-use std::ops::Add;
-use std::task::{Context, Poll};
-use std::time::Duration;
-use void::Void;
+
+use either::Either;
+use libp2p_core::{multiaddr::Protocol, transport::PortUse, ConnectedPoint, Endpoint, Multiaddr};
+use libp2p_identity::PeerId;
+use libp2p_swarm::{
+    behaviour::{ConnectionClosed, FromSwarm},
+    dummy, ConnectionDenied, ConnectionId, ExternalAddresses, NetworkBehaviour, NotifyHandler,
+    THandler, THandlerInEvent, THandlerOutEvent, ToSwarm,
+};
+use web_time::Instant;
+
+use crate::{
+    behaviour::handler::Handler,
+    multiaddr_ext::MultiaddrExt,
+    proto,
+    protocol::{inbound_hop, outbound_stop},
+};
 
 /// Configuration for the relay [`Behaviour`].
 ///
@@ -60,6 +63,40 @@ pub struct Config {
     pub max_circuit_duration: Duration,
     pub max_circuit_bytes: u64,
     pub circuit_src_rate_limiters: Vec<Box<dyn rate_limiter::RateLimiter>>,
+}
+
+impl Config {
+    pub fn reservation_rate_per_peer(mut self, limit: NonZeroU32, interval: Duration) -> Self {
+        self.reservation_rate_limiters
+            .push(rate_limiter::new_per_peer(
+                rate_limiter::GenericRateLimiterConfig { limit, interval },
+            ));
+        self
+    }
+
+    pub fn circuit_src_per_peer(mut self, limit: NonZeroU32, interval: Duration) -> Self {
+        self.circuit_src_rate_limiters
+            .push(rate_limiter::new_per_peer(
+                rate_limiter::GenericRateLimiterConfig { limit, interval },
+            ));
+        self
+    }
+
+    pub fn reservation_rate_per_ip(mut self, limit: NonZeroU32, interval: Duration) -> Self {
+        self.reservation_rate_limiters
+            .push(rate_limiter::new_per_ip(
+                rate_limiter::GenericRateLimiterConfig { limit, interval },
+            ));
+        self
+    }
+
+    pub fn circuit_src_per_ip(mut self, limit: NonZeroU32, interval: Duration) -> Self {
+        self.circuit_src_rate_limiters
+            .push(rate_limiter::new_per_ip(
+                rate_limiter::GenericRateLimiterConfig { limit, interval },
+            ));
+        self
+    }
 }
 
 impl std::fmt::Debug for Config {
@@ -87,12 +124,14 @@ impl std::fmt::Debug for Config {
 impl Default for Config {
     fn default() -> Self {
         let reservation_rate_limiters = vec![
-            // For each peer ID one reservation every 2 minutes with up to 30 reservations per hour.
+            // For each peer ID one reservation every 2 minutes with up
+            // to 30 reservations per hour.
             rate_limiter::new_per_peer(rate_limiter::GenericRateLimiterConfig {
                 limit: NonZeroU32::new(30).expect("30 > 0"),
                 interval: Duration::from_secs(60 * 2),
             }),
-            // For each IP address one reservation every minute with up to 60 reservations per hour.
+            // For each IP address one reservation every minute with up
+            // to 60 reservations per hour.
             rate_limiter::new_per_ip(rate_limiter::GenericRateLimiterConfig {
                 limit: NonZeroU32::new(60).expect("60 > 0"),
                 interval: Duration::from_secs(60),
@@ -137,50 +176,63 @@ pub enum Event {
         renewed: bool,
     },
     /// Accepting an inbound reservation request failed.
+    #[deprecated(
+        note = "Will be removed in favor of logging them internally, see <https://github.com/libp2p/rust-libp2p/issues/4757> for details."
+    )]
     ReservationReqAcceptFailed {
         src_peer_id: PeerId,
-        error: inbound_hop::UpgradeError,
+        error: inbound_hop::Error,
     },
     /// An inbound reservation request has been denied.
     ReservationReqDenied { src_peer_id: PeerId },
     /// Denying an inbound reservation request has failed.
+    #[deprecated(
+        note = "Will be removed in favor of logging them internally, see <https://github.com/libp2p/rust-libp2p/issues/4757> for details."
+    )]
     ReservationReqDenyFailed {
         src_peer_id: PeerId,
-        error: inbound_hop::UpgradeError,
+        error: inbound_hop::Error,
     },
+    /// A reservation has been closed.
+    ReservationClosed { src_peer_id: PeerId },
     /// An inbound reservation has timed out.
     ReservationTimedOut { src_peer_id: PeerId },
-    CircuitReqReceiveFailed {
-        src_peer_id: PeerId,
-        error: ConnectionHandlerUpgrErr<void::Void>,
-    },
     /// An inbound circuit request has been denied.
     CircuitReqDenied {
         src_peer_id: PeerId,
         dst_peer_id: PeerId,
     },
     /// Denying an inbound circuit request failed.
+    #[deprecated(
+        note = "Will be removed in favor of logging them internally, see <https://github.com/libp2p/rust-libp2p/issues/4757> for details."
+    )]
     CircuitReqDenyFailed {
         src_peer_id: PeerId,
         dst_peer_id: PeerId,
-        error: inbound_hop::UpgradeError,
+        error: inbound_hop::Error,
     },
-    /// An inbound cirucit request has been accepted.
+    /// An inbound circuit request has been accepted.
     CircuitReqAccepted {
         src_peer_id: PeerId,
         dst_peer_id: PeerId,
     },
-    /// An outbound connect for an inbound cirucit request failed.
+    /// An outbound connect for an inbound circuit request failed.
+    #[deprecated(
+        note = "Will be removed in favor of logging them internally, see <https://github.com/libp2p/rust-libp2p/issues/4757> for details."
+    )]
     CircuitReqOutboundConnectFailed {
         src_peer_id: PeerId,
         dst_peer_id: PeerId,
-        error: ConnectionHandlerUpgrErr<outbound_stop::CircuitFailedReason>,
+        error: outbound_stop::Error,
     },
     /// Accepting an inbound circuit request failed.
+    #[deprecated(
+        note = "Will be removed in favor of logging them internally, see <https://github.com/libp2p/rust-libp2p/issues/4757> for details."
+    )]
     CircuitReqAcceptFailed {
         src_peer_id: PeerId,
         dst_peer_id: PeerId,
-        error: inbound_hop::UpgradeError,
+        error: inbound_hop::Error,
     },
     /// An inbound circuit has closed.
     CircuitClosed {
@@ -201,7 +253,7 @@ pub struct Behaviour {
     circuits: CircuitsTracker,
 
     /// Queue of actions to return when polled.
-    queued_actions: VecDeque<Action>,
+    queued_actions: VecDeque<ToSwarm<Event, THandlerInEvent<Self>>>,
 
     external_addresses: ExternalAddresses,
 }
@@ -224,10 +276,15 @@ impl Behaviour {
             peer_id,
             connection_id,
             ..
-        }: ConnectionClosed<<Self as NetworkBehaviour>::ConnectionHandler>,
+        }: ConnectionClosed,
     ) {
         if let hash_map::Entry::Occupied(mut peer) = self.reservations.entry(peer_id) {
-            peer.get_mut().remove(&connection_id);
+            if peer.get_mut().remove(&connection_id) {
+                self.queued_actions
+                    .push_back(ToSwarm::GenerateEvent(Event::ReservationClosed {
+                        src_peer_id: peer_id,
+                    }));
+            }
             if peer.get().is_empty() {
                 peer.remove();
             }
@@ -240,21 +297,19 @@ impl Behaviour {
             // Only emit [`CircuitClosed`] for accepted requests.
             .filter(|c| matches!(c.status, CircuitStatus::Accepted))
         {
-            self.queued_actions.push_back(
-                NetworkBehaviourAction::GenerateEvent(Event::CircuitClosed {
+            self.queued_actions
+                .push_back(ToSwarm::GenerateEvent(Event::CircuitClosed {
                     src_peer_id: circuit.src_peer_id,
                     dst_peer_id: circuit.dst_peer_id,
                     error: Some(std::io::ErrorKind::ConnectionAborted.into()),
-                })
-                .into(),
-            );
+                }));
         }
     }
 }
 
 impl NetworkBehaviour for Behaviour {
     type ConnectionHandler = Either<Handler, dummy::ConnectionHandler>;
-    type OutEvent = Event;
+    type ToSwarm = Event;
 
     fn handle_established_inbound_connection(
         &mut self,
@@ -287,6 +342,7 @@ impl NetworkBehaviour for Behaviour {
         _: PeerId,
         addr: &Multiaddr,
         role_override: Endpoint,
+        port_use: PortUse,
     ) -> Result<THandler<Self>, ConnectionDenied> {
         if addr.is_relayed() {
             // Deny all substreams on relayed connection.
@@ -302,28 +358,16 @@ impl NetworkBehaviour for Behaviour {
             ConnectedPoint::Dialer {
                 address: addr.clone(),
                 role_override,
+                port_use,
             },
         )))
     }
 
-    fn on_swarm_event(&mut self, event: FromSwarm<Self::ConnectionHandler>) {
+    fn on_swarm_event(&mut self, event: FromSwarm) {
         self.external_addresses.on_swarm_event(&event);
 
-        match event {
-            FromSwarm::ConnectionClosed(connection_closed) => {
-                self.on_connection_closed(connection_closed)
-            }
-            FromSwarm::ConnectionEstablished(_)
-            | FromSwarm::DialFailure(_)
-            | FromSwarm::AddressChange(_)
-            | FromSwarm::ListenFailure(_)
-            | FromSwarm::NewListener(_)
-            | FromSwarm::NewListenAddr(_)
-            | FromSwarm::ExpiredListenAddr(_)
-            | FromSwarm::ListenerError(_)
-            | FromSwarm::ListenerClosed(_)
-            | FromSwarm::NewExternalAddr(_)
-            | FromSwarm::ExpiredExternalAddr(_) => {}
+        if let FromSwarm::ConnectionClosed(connection_closed) = event {
+            self.on_connection_closed(connection_closed)
         }
     }
 
@@ -335,7 +379,9 @@ impl NetworkBehaviour for Behaviour {
     ) {
         let event = match event {
             Either::Left(e) => e,
-            Either::Right(v) => void::unreachable(v),
+            // TODO: remove when Rust 1.82 is MSRV
+            #[allow(unreachable_patterns)]
+            Either::Right(v) => libp2p_core::util::unreachable(v),
         };
 
         match event {
@@ -353,7 +399,8 @@ impl NetworkBehaviour for Behaviour {
                 );
 
                 let action = if
-                // Deny if it is a new reservation and exceeds `max_reservations_per_peer`.
+                // Deny if it is a new reservation and exceeds
+                // `max_reservations_per_peer`.
                 (!renewed
                     && self
                         .reservations
@@ -376,7 +423,7 @@ impl NetworkBehaviour for Behaviour {
                         .all(|limiter| {
                             limiter.try_next(event_source, endpoint.get_remote_address(), now)
                         }) {
-                    NetworkBehaviourAction::NotifyHandler {
+                    ToSwarm::NotifyHandler {
                         handler: NotifyHandler::One(connection),
                         peer_id: event_source,
                         event: Either::Left(handler::In::DenyReservationReq {
@@ -384,7 +431,6 @@ impl NetworkBehaviour for Behaviour {
                             status: proto::Status::RESOURCE_LIMIT_EXCEEDED,
                         }),
                     }
-                    .into()
                 } else {
                     // Accept reservation.
                     self.reservations
@@ -392,10 +438,22 @@ impl NetworkBehaviour for Behaviour {
                         .or_default()
                         .insert(connection);
 
-                    Action::AcceptReservationPrototype {
+                    ToSwarm::NotifyHandler {
                         handler: NotifyHandler::One(connection),
                         peer_id: event_source,
-                        inbound_reservation_req,
+                        event: Either::Left(handler::In::AcceptReservationReq {
+                            inbound_reservation_req,
+                            addrs: self
+                                .external_addresses
+                                .iter()
+                                .cloned()
+                                // Add local peer ID in case it isn't present yet.
+                                .filter_map(|a| match a.iter().last()? {
+                                    Protocol::P2p(_) => Some(a),
+                                    _ => Some(a.with(Protocol::P2p(self.local_peer_id))),
+                                })
+                                .collect(),
+                        }),
                     }
                 };
 
@@ -409,39 +467,37 @@ impl NetworkBehaviour for Behaviour {
                     .or_default()
                     .insert(connection);
 
-                self.queued_actions.push_back(
-                    NetworkBehaviourAction::GenerateEvent(Event::ReservationReqAccepted {
+                self.queued_actions.push_back(ToSwarm::GenerateEvent(
+                    Event::ReservationReqAccepted {
                         src_peer_id: event_source,
                         renewed,
-                    })
-                    .into(),
-                );
+                    },
+                ));
             }
             handler::Event::ReservationReqAcceptFailed { error } => {
-                self.queued_actions.push_back(
-                    NetworkBehaviourAction::GenerateEvent(Event::ReservationReqAcceptFailed {
+                #[allow(deprecated)]
+                self.queued_actions.push_back(ToSwarm::GenerateEvent(
+                    Event::ReservationReqAcceptFailed {
                         src_peer_id: event_source,
                         error,
-                    })
-                    .into(),
-                );
+                    },
+                ));
             }
             handler::Event::ReservationReqDenied {} => {
-                self.queued_actions.push_back(
-                    NetworkBehaviourAction::GenerateEvent(Event::ReservationReqDenied {
+                self.queued_actions.push_back(ToSwarm::GenerateEvent(
+                    Event::ReservationReqDenied {
                         src_peer_id: event_source,
-                    })
-                    .into(),
-                );
+                    },
+                ));
             }
             handler::Event::ReservationReqDenyFailed { error } => {
-                self.queued_actions.push_back(
-                    NetworkBehaviourAction::GenerateEvent(Event::ReservationReqDenyFailed {
+                #[allow(deprecated)]
+                self.queued_actions.push_back(ToSwarm::GenerateEvent(
+                    Event::ReservationReqDenyFailed {
                         src_peer_id: event_source,
                         error,
-                    })
-                    .into(),
-                );
+                    },
+                ));
             }
             handler::Event::ReservationTimedOut {} => {
                 match self.reservations.entry(event_source) {
@@ -460,12 +516,10 @@ impl NetworkBehaviour for Behaviour {
                     }
                 }
 
-                self.queued_actions.push_back(
-                    NetworkBehaviourAction::GenerateEvent(Event::ReservationTimedOut {
+                self.queued_actions
+                    .push_back(ToSwarm::GenerateEvent(Event::ReservationTimedOut {
                         src_peer_id: event_source,
-                    })
-                    .into(),
-                );
+                    }));
             }
             handler::Event::CircuitReqReceived {
                 inbound_circuit_req,
@@ -490,7 +544,7 @@ impl NetworkBehaviour for Behaviour {
                             limiter.try_next(event_source, endpoint.get_remote_address(), now)
                         }) {
                     // Deny circuit exceeding limits.
-                    NetworkBehaviourAction::NotifyHandler {
+                    ToSwarm::NotifyHandler {
                         handler: NotifyHandler::One(connection),
                         peer_id: event_source,
                         event: Either::Left(handler::In::DenyCircuitReq {
@@ -513,20 +567,19 @@ impl NetworkBehaviour for Behaviour {
                         dst_connection_id: *dst_conn,
                     });
 
-                    NetworkBehaviourAction::NotifyHandler {
+                    ToSwarm::NotifyHandler {
                         handler: NotifyHandler::One(*dst_conn),
                         peer_id: event_source,
                         event: Either::Left(handler::In::NegotiateOutboundConnect {
                             circuit_id,
                             inbound_circuit_req,
-                            relay_peer_id: self.local_peer_id,
                             src_peer_id: event_source,
                             src_connection_id: connection,
                         }),
                     }
                 } else {
                     // Deny circuit request if no reservation present.
-                    NetworkBehaviourAction::NotifyHandler {
+                    ToSwarm::NotifyHandler {
                         handler: NotifyHandler::One(connection),
                         peer_id: event_source,
                         event: Either::Left(handler::In::DenyCircuitReq {
@@ -536,16 +589,7 @@ impl NetworkBehaviour for Behaviour {
                         }),
                     }
                 };
-                self.queued_actions.push_back(action.into());
-            }
-            handler::Event::CircuitReqReceiveFailed { error } => {
-                self.queued_actions.push_back(
-                    NetworkBehaviourAction::GenerateEvent(Event::CircuitReqReceiveFailed {
-                        src_peer_id: event_source,
-                        error,
-                    })
-                    .into(),
-                );
+                self.queued_actions.push_back(action);
             }
             handler::Event::CircuitReqDenied {
                 circuit_id,
@@ -555,13 +599,11 @@ impl NetworkBehaviour for Behaviour {
                     self.circuits.remove(circuit_id);
                 }
 
-                self.queued_actions.push_back(
-                    NetworkBehaviourAction::GenerateEvent(Event::CircuitReqDenied {
+                self.queued_actions
+                    .push_back(ToSwarm::GenerateEvent(Event::CircuitReqDenied {
                         src_peer_id: event_source,
                         dst_peer_id,
-                    })
-                    .into(),
-                );
+                    }));
             }
             handler::Event::CircuitReqDenyFailed {
                 circuit_id,
@@ -572,39 +614,34 @@ impl NetworkBehaviour for Behaviour {
                     self.circuits.remove(circuit_id);
                 }
 
-                self.queued_actions.push_back(
-                    NetworkBehaviourAction::GenerateEvent(Event::CircuitReqDenyFailed {
+                #[allow(deprecated)]
+                self.queued_actions.push_back(ToSwarm::GenerateEvent(
+                    Event::CircuitReqDenyFailed {
                         src_peer_id: event_source,
                         dst_peer_id,
                         error,
-                    })
-                    .into(),
-                );
+                    },
+                ));
             }
             handler::Event::OutboundConnectNegotiated {
                 circuit_id,
                 src_peer_id,
                 src_connection_id,
                 inbound_circuit_req,
-                dst_handler_notifier,
                 dst_stream,
                 dst_pending_data,
             } => {
-                self.queued_actions.push_back(
-                    NetworkBehaviourAction::NotifyHandler {
-                        handler: NotifyHandler::One(src_connection_id),
-                        peer_id: src_peer_id,
-                        event: Either::Left(handler::In::AcceptAndDriveCircuit {
-                            circuit_id,
-                            dst_peer_id: event_source,
-                            inbound_circuit_req,
-                            dst_handler_notifier,
-                            dst_stream,
-                            dst_pending_data,
-                        }),
-                    }
-                    .into(),
-                );
+                self.queued_actions.push_back(ToSwarm::NotifyHandler {
+                    handler: NotifyHandler::One(src_connection_id),
+                    peer_id: src_peer_id,
+                    event: Either::Left(handler::In::AcceptAndDriveCircuit {
+                        circuit_id,
+                        dst_peer_id: event_source,
+                        inbound_circuit_req,
+                        dst_stream,
+                        dst_pending_data,
+                    }),
+                });
             }
             handler::Event::OutboundConnectNegotiationFailed {
                 circuit_id,
@@ -614,39 +651,34 @@ impl NetworkBehaviour for Behaviour {
                 status,
                 error,
             } => {
-                self.queued_actions.push_back(
-                    NetworkBehaviourAction::NotifyHandler {
-                        handler: NotifyHandler::One(src_connection_id),
-                        peer_id: src_peer_id,
-                        event: Either::Left(handler::In::DenyCircuitReq {
-                            circuit_id: Some(circuit_id),
-                            inbound_circuit_req,
-                            status,
-                        }),
-                    }
-                    .into(),
-                );
-                self.queued_actions.push_back(
-                    NetworkBehaviourAction::GenerateEvent(Event::CircuitReqOutboundConnectFailed {
+                self.queued_actions.push_back(ToSwarm::NotifyHandler {
+                    handler: NotifyHandler::One(src_connection_id),
+                    peer_id: src_peer_id,
+                    event: Either::Left(handler::In::DenyCircuitReq {
+                        circuit_id: Some(circuit_id),
+                        inbound_circuit_req,
+                        status,
+                    }),
+                });
+                #[allow(deprecated)]
+                self.queued_actions.push_back(ToSwarm::GenerateEvent(
+                    Event::CircuitReqOutboundConnectFailed {
                         src_peer_id,
                         dst_peer_id: event_source,
                         error,
-                    })
-                    .into(),
-                );
+                    },
+                ));
             }
             handler::Event::CircuitReqAccepted {
                 dst_peer_id,
                 circuit_id,
             } => {
                 self.circuits.accepted(circuit_id);
-                self.queued_actions.push_back(
-                    NetworkBehaviourAction::GenerateEvent(Event::CircuitReqAccepted {
+                self.queued_actions
+                    .push_back(ToSwarm::GenerateEvent(Event::CircuitReqAccepted {
                         src_peer_id: event_source,
                         dst_peer_id,
-                    })
-                    .into(),
-                );
+                    }));
             }
             handler::Event::CircuitReqAcceptFailed {
                 dst_peer_id,
@@ -654,14 +686,14 @@ impl NetworkBehaviour for Behaviour {
                 error,
             } => {
                 self.circuits.remove(circuit_id);
-                self.queued_actions.push_back(
-                    NetworkBehaviourAction::GenerateEvent(Event::CircuitReqAcceptFailed {
+                #[allow(deprecated)]
+                self.queued_actions.push_back(ToSwarm::GenerateEvent(
+                    Event::CircuitReqAcceptFailed {
                         src_peer_id: event_source,
                         dst_peer_id,
                         error,
-                    })
-                    .into(),
-                );
+                    },
+                ));
             }
             handler::Event::CircuitClosed {
                 dst_peer_id,
@@ -670,25 +702,20 @@ impl NetworkBehaviour for Behaviour {
             } => {
                 self.circuits.remove(circuit_id);
 
-                self.queued_actions.push_back(
-                    NetworkBehaviourAction::GenerateEvent(Event::CircuitClosed {
+                self.queued_actions
+                    .push_back(ToSwarm::GenerateEvent(Event::CircuitClosed {
                         src_peer_id: event_source,
                         dst_peer_id,
                         error,
-                    })
-                    .into(),
-                );
+                    }));
             }
         }
     }
 
-    fn poll(
-        &mut self,
-        _cx: &mut Context<'_>,
-        _: &mut impl PollParameters,
-    ) -> Poll<NetworkBehaviourAction<Self::OutEvent, THandlerInEvent<Self>>> {
-        if let Some(action) = self.queued_actions.pop_front() {
-            return Poll::Ready(action.build(self.local_peer_id, &self.external_addresses));
+    #[tracing::instrument(level = "trace", name = "NetworkBehaviour::poll", skip(self))]
+    fn poll(&mut self, _: &mut Context<'_>) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        if let Some(to_swarm) = self.queued_actions.pop_front() {
+            return Poll::Ready(to_swarm);
         }
 
         Poll::Pending
@@ -782,55 +809,5 @@ impl Add<u64> for CircuitId {
 
     fn add(self, rhs: u64) -> Self {
         CircuitId(self.0 + rhs)
-    }
-}
-
-/// A [`NetworkBehaviourAction`], either complete, or still requiring data from [`PollParameters`]
-/// before being returned in [`Behaviour::poll`].
-#[allow(clippy::large_enum_variant)]
-enum Action {
-    Done(NetworkBehaviourAction<Event, Either<handler::In, Void>>),
-    AcceptReservationPrototype {
-        inbound_reservation_req: inbound_hop::ReservationReq,
-        handler: NotifyHandler,
-        peer_id: PeerId,
-    },
-}
-
-impl From<NetworkBehaviourAction<Event, Either<handler::In, Void>>> for Action {
-    fn from(action: NetworkBehaviourAction<Event, Either<handler::In, Void>>) -> Self {
-        Self::Done(action)
-    }
-}
-
-impl Action {
-    fn build(
-        self,
-        local_peer_id: PeerId,
-        external_addresses: &ExternalAddresses,
-    ) -> NetworkBehaviourAction<Event, Either<handler::In, Void>> {
-        match self {
-            Action::Done(action) => action,
-            Action::AcceptReservationPrototype {
-                inbound_reservation_req,
-                handler,
-                peer_id,
-            } => NetworkBehaviourAction::NotifyHandler {
-                handler,
-                peer_id,
-                event: Either::Left(handler::In::AcceptReservationReq {
-                    inbound_reservation_req,
-                    addrs: external_addresses
-                        .iter()
-                        .cloned()
-                        // Add local peer ID in case it isn't present yet.
-                        .filter_map(|a| match a.iter().last()? {
-                            Protocol::P2p(_) => Some(a),
-                            _ => Some(a.with(Protocol::P2p(local_peer_id.into()))),
-                        })
-                        .collect(),
-                }),
-            },
-        }
     }
 }

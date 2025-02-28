@@ -18,20 +18,25 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::upgrade::{InboundUpgrade, OutboundUpgrade, ProtocolName, UpgradeError};
-use crate::{connection::ConnectedPoint, Negotiated};
-use futures::{future::Either, prelude::*};
-use log::debug;
-use multistream_select::{self, DialerSelectFuture, ListenerSelectFuture};
-use std::{iter, mem, pin::Pin, task::Context, task::Poll};
+use std::{
+    mem,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
-pub use multistream_select::Version;
-use smallvec::SmallVec;
-use std::fmt;
+use futures::{future::Either, prelude::*};
+pub(crate) use multistream_select::Version;
+use multistream_select::{DialerSelectFuture, ListenerSelectFuture};
+
+use crate::{
+    connection::ConnectedPoint,
+    upgrade::{InboundConnectionUpgrade, OutboundConnectionUpgrade, UpgradeError},
+    Negotiated,
+};
 
 // TODO: Still needed?
 /// Applies an upgrade to the inbound and outbound direction of a connection or substream.
-pub fn apply<C, U>(
+pub(crate) fn apply<C, U>(
     conn: C,
     up: U,
     cp: ConnectedPoint,
@@ -39,7 +44,7 @@ pub fn apply<C, U>(
 ) -> Either<InboundUpgradeApply<C, U>, OutboundUpgradeApply<C, U>>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: InboundUpgrade<Negotiated<C>> + OutboundUpgrade<Negotiated<C>>,
+    U: InboundConnectionUpgrade<Negotiated<C>> + OutboundConnectionUpgrade<Negotiated<C>>,
 {
     match cp {
         ConnectedPoint::Dialer { role_override, .. } if role_override.is_dialer() => {
@@ -50,38 +55,28 @@ where
 }
 
 /// Tries to perform an upgrade on an inbound connection or substream.
-pub fn apply_inbound<C, U>(conn: C, up: U) -> InboundUpgradeApply<C, U>
+pub(crate) fn apply_inbound<C, U>(conn: C, up: U) -> InboundUpgradeApply<C, U>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: InboundUpgrade<Negotiated<C>>,
+    U: InboundConnectionUpgrade<Negotiated<C>>,
 {
-    let iter = up
-        .protocol_info()
-        .into_iter()
-        .map(NameWrap as fn(_) -> NameWrap<_>);
-    let future = multistream_select::listener_select_proto(conn, iter);
     InboundUpgradeApply {
         inner: InboundUpgradeApplyState::Init {
-            future,
+            future: multistream_select::listener_select_proto(conn, up.protocol_info()),
             upgrade: up,
         },
     }
 }
 
 /// Tries to perform an upgrade on an outbound connection or substream.
-pub fn apply_outbound<C, U>(conn: C, up: U, v: Version) -> OutboundUpgradeApply<C, U>
+pub(crate) fn apply_outbound<C, U>(conn: C, up: U, v: Version) -> OutboundUpgradeApply<C, U>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: OutboundUpgrade<Negotiated<C>>,
+    U: OutboundConnectionUpgrade<Negotiated<C>>,
 {
-    let iter = up
-        .protocol_info()
-        .into_iter()
-        .map(NameWrap as fn(_) -> NameWrap<_>);
-    let future = multistream_select::dialer_select_proto(conn, iter, v);
     OutboundUpgradeApply {
         inner: OutboundUpgradeApplyState::Init {
-            future,
+            future: multistream_select::dialer_select_proto(conn, up.protocol_info(), v),
             upgrade: up,
         },
     }
@@ -91,23 +86,24 @@ where
 pub struct InboundUpgradeApply<C, U>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: InboundUpgrade<Negotiated<C>>,
+    U: InboundConnectionUpgrade<Negotiated<C>>,
 {
     inner: InboundUpgradeApplyState<C, U>,
 }
 
+#[allow(clippy::large_enum_variant)]
 enum InboundUpgradeApplyState<C, U>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: InboundUpgrade<Negotiated<C>>,
+    U: InboundConnectionUpgrade<Negotiated<C>>,
 {
     Init {
-        future: ListenerSelectFuture<C, NameWrap<U::Info>>,
+        future: ListenerSelectFuture<C, U::Info>,
         upgrade: U,
     },
     Upgrade {
         future: Pin<Box<U::Future>>,
-        name: SmallVec<[u8; 32]>,
+        name: String,
     },
     Undefined,
 }
@@ -115,14 +111,14 @@ where
 impl<C, U> Unpin for InboundUpgradeApply<C, U>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: InboundUpgrade<Negotiated<C>>,
+    U: InboundConnectionUpgrade<Negotiated<C>>,
 {
 }
 
 impl<C, U> Future for InboundUpgradeApply<C, U>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: InboundUpgrade<Negotiated<C>>,
+    U: InboundConnectionUpgrade<Negotiated<C>>,
 {
     type Output = Result<U::Output, UpgradeError<U::Error>>;
 
@@ -140,10 +136,9 @@ where
                             return Poll::Pending;
                         }
                     };
-                    let name = SmallVec::from_slice(info.protocol_name());
                     self.inner = InboundUpgradeApplyState::Upgrade {
-                        future: Box::pin(upgrade.upgrade_inbound(io, info.0)),
-                        name,
+                        future: Box::pin(upgrade.upgrade_inbound(io, info.clone())),
+                        name: info.as_ref().to_owned(),
                     };
                 }
                 InboundUpgradeApplyState::Upgrade { mut future, name } => {
@@ -153,14 +148,11 @@ where
                             return Poll::Pending;
                         }
                         Poll::Ready(Ok(x)) => {
-                            log::trace!("Upgraded inbound stream to {}", DisplayProtocolName(name));
+                            tracing::trace!(upgrade=%name, "Upgraded inbound stream");
                             return Poll::Ready(Ok(x));
                         }
                         Poll::Ready(Err(e)) => {
-                            debug!(
-                                "Failed to upgrade inbound stream to {}",
-                                DisplayProtocolName(name)
-                            );
+                            tracing::debug!(upgrade=%name, "Failed to upgrade inbound stream");
                             return Poll::Ready(Err(UpgradeError::Apply(e)));
                         }
                     }
@@ -177,7 +169,7 @@ where
 pub struct OutboundUpgradeApply<C, U>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: OutboundUpgrade<Negotiated<C>>,
+    U: OutboundConnectionUpgrade<Negotiated<C>>,
 {
     inner: OutboundUpgradeApplyState<C, U>,
 }
@@ -185,15 +177,15 @@ where
 enum OutboundUpgradeApplyState<C, U>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: OutboundUpgrade<Negotiated<C>>,
+    U: OutboundConnectionUpgrade<Negotiated<C>>,
 {
     Init {
-        future: DialerSelectFuture<C, NameWrapIter<<U::InfoIter as IntoIterator>::IntoIter>>,
+        future: DialerSelectFuture<C, <U::InfoIter as IntoIterator>::IntoIter>,
         upgrade: U,
     },
     Upgrade {
         future: Pin<Box<U::Future>>,
-        name: SmallVec<[u8; 32]>,
+        name: String,
     },
     Undefined,
 }
@@ -201,14 +193,14 @@ where
 impl<C, U> Unpin for OutboundUpgradeApply<C, U>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: OutboundUpgrade<Negotiated<C>>,
+    U: OutboundConnectionUpgrade<Negotiated<C>>,
 {
 }
 
 impl<C, U> Future for OutboundUpgradeApply<C, U>
 where
     C: AsyncRead + AsyncWrite + Unpin,
-    U: OutboundUpgrade<Negotiated<C>>,
+    U: OutboundConnectionUpgrade<Negotiated<C>>,
 {
     type Output = Result<U::Output, UpgradeError<U::Error>>;
 
@@ -226,10 +218,9 @@ where
                             return Poll::Pending;
                         }
                     };
-                    let name = SmallVec::from_slice(info.protocol_name());
                     self.inner = OutboundUpgradeApplyState::Upgrade {
-                        future: Box::pin(upgrade.upgrade_outbound(connection, info.0)),
-                        name,
+                        future: Box::pin(upgrade.upgrade_outbound(connection, info.clone())),
+                        name: info.as_ref().to_owned(),
                     };
                 }
                 OutboundUpgradeApplyState::Upgrade { mut future, name } => {
@@ -239,17 +230,11 @@ where
                             return Poll::Pending;
                         }
                         Poll::Ready(Ok(x)) => {
-                            log::trace!(
-                                "Upgraded outbound stream to {}",
-                                DisplayProtocolName(name)
-                            );
+                            tracing::trace!(upgrade=%name, "Upgraded outbound stream");
                             return Poll::Ready(Ok(x));
                         }
                         Poll::Ready(Err(e)) => {
-                            debug!(
-                                "Failed to upgrade outbound stream to {}",
-                                DisplayProtocolName(name)
-                            );
+                            tracing::debug!(upgrade=%name, "Failed to upgrade outbound stream",);
                             return Poll::Ready(Err(UpgradeError::Apply(e)));
                         }
                     }
@@ -259,53 +244,5 @@ where
                 }
             }
         }
-    }
-}
-
-type NameWrapIter<I> = iter::Map<I, fn(<I as Iterator>::Item) -> NameWrap<<I as Iterator>::Item>>;
-
-/// Wrapper type to expose an `AsRef<[u8]>` impl for all types implementing `ProtocolName`.
-#[derive(Clone)]
-struct NameWrap<N>(N);
-
-impl<N: ProtocolName> AsRef<[u8]> for NameWrap<N> {
-    fn as_ref(&self) -> &[u8] {
-        self.0.protocol_name()
-    }
-}
-
-/// Wrapper for printing a [`ProtocolName`] that is expected to be mostly ASCII
-pub(crate) struct DisplayProtocolName<N>(pub N);
-
-impl<N: ProtocolName> fmt::Display for DisplayProtocolName<N> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use fmt::Write;
-        for byte in self.0.protocol_name() {
-            if (b' '..=b'~').contains(byte) {
-                f.write_char(char::from(*byte))?;
-            } else {
-                write!(f, "<{byte:02X}>")?;
-            }
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn display_protocol_name() {
-        assert_eq!(DisplayProtocolName(b"/hello/1.0").to_string(), "/hello/1.0");
-        assert_eq!(DisplayProtocolName("/hellö/").to_string(), "/hell<C3><B6>/");
-        assert_eq!(
-            DisplayProtocolName((0u8..=255).collect::<Vec<_>>()).to_string(),
-            (0..32)
-                .map(|c| format!("<{c:02X}>"))
-                .chain((32..127).map(|c| format!("{}", char::from_u32(c).unwrap())))
-                .chain((127..256).map(|c| format!("<{c:02X}>")))
-                .collect::<String>()
-        );
     }
 }

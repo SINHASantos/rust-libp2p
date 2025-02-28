@@ -22,41 +22,30 @@
 //!
 //! The main concepts of libp2p-core are:
 //!
-//! - A [`PeerId`] is a unique global identifier for a node on the network.
-//!   Each node must have a different [`PeerId`]. Normally, a [`PeerId`] is the
-//!   hash of the public key used to negotiate encryption on the
-//!   communication channel, thereby guaranteeing that they cannot be spoofed.
-//! - The [`Transport`] trait defines how to reach a remote node or listen for
-//!   incoming remote connections. See the [`transport`] module.
-//! - The [`StreamMuxer`] trait is implemented on structs that hold a connection
-//!   to a remote and can subdivide this connection into multiple substreams.
-//!   See the [`muxing`] module.
-//! - The [`UpgradeInfo`], [`InboundUpgrade`] and [`OutboundUpgrade`] traits
-//!   define how to upgrade each individual substream to use a protocol.
-//!   See the `upgrade` module.
+//! - The [`Transport`] trait defines how to reach a remote node or listen for incoming remote
+//!   connections. See the [`transport`] module.
+//! - The [`StreamMuxer`] trait is implemented on structs that hold a connection to a remote and can
+//!   subdivide this connection into multiple substreams. See the [`muxing`] module.
+//! - The [`UpgradeInfo`], [`InboundUpgrade`] and [`OutboundUpgrade`] traits define how to upgrade
+//!   each individual substream to use a protocol. See the `upgrade` module.
 
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
 mod proto {
+    #![allow(unreachable_pub)]
     include!("generated/mod.rs");
     pub use self::{
-        envelope_proto::*, keys_proto::*, peer_record_proto::mod_PeerRecord::*,
-        peer_record_proto::PeerRecord,
+        envelope_proto::*,
+        peer_record_proto::{mod_PeerRecord::*, PeerRecord},
     };
 }
 
 /// Multi-address re-export.
 pub use multiaddr;
-use std::fmt;
-use std::fmt::Formatter;
 pub type Negotiated<T> = multistream_select::Negotiated<T>;
-
-mod peer_id;
-mod translation;
 
 pub mod connection;
 pub mod either;
-pub mod identity;
 pub mod muxing;
 pub mod peer_record;
 pub mod signed_envelope;
@@ -64,29 +53,25 @@ pub mod transport;
 pub mod upgrade;
 
 pub use connection::{ConnectedPoint, Endpoint};
-pub use identity::PublicKey;
+pub use libp2p_identity::PeerId;
 pub use multiaddr::Multiaddr;
 pub use multihash;
 pub use muxing::StreamMuxer;
-pub use peer_id::ParseError;
-pub use peer_id::PeerId;
 pub use peer_record::PeerRecord;
 pub use signed_envelope::SignedEnvelope;
-pub use translation::address_translation;
 pub use transport::Transport;
-pub use upgrade::{InboundUpgrade, OutboundUpgrade, ProtocolName, UpgradeError, UpgradeInfo};
+pub use upgrade::{InboundUpgrade, OutboundUpgrade, UpgradeInfo};
 
 #[derive(Debug, thiserror::Error)]
-pub struct DecodeError(String);
+#[error(transparent)]
+pub struct DecodeError(quick_protobuf::Error);
 
-impl From<quick_protobuf::Error> for DecodeError {
-    fn from(e: quick_protobuf::Error) -> Self {
-        Self(e.to_string())
-    }
-}
+pub mod util {
+    use std::convert::Infallible;
 
-impl fmt::Display for DecodeError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
+    /// A safe version of [`std::intrinsics::unreachable`].
+    #[inline(always)]
+    pub fn unreachable(x: Infallible) -> ! {
+        match x {}
     }
 }

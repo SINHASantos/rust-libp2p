@@ -18,44 +18,36 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-use crate::{protocol, PROTOCOL_NAME};
-use futures::future::BoxFuture;
-use futures::prelude::*;
-use futures_timer::Delay;
-use libp2p_core::upgrade::ReadyUpgrade;
-use libp2p_core::{upgrade::NegotiationError, UpgradeError};
-use libp2p_swarm::handler::{
-    ConnectionEvent, DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound,
-};
-use libp2p_swarm::{
-    ConnectionHandler, ConnectionHandlerEvent, ConnectionHandlerUpgrErr, KeepAlive,
-    NegotiatedSubstream, SubstreamProtocol,
-};
-use std::collections::VecDeque;
 use std::{
+    collections::VecDeque,
+    convert::Infallible,
     error::Error,
     fmt, io,
-    num::NonZeroU32,
     task::{Context, Poll},
     time::Duration,
 };
-use void::Void;
+
+use futures::{
+    future::{BoxFuture, Either},
+    prelude::*,
+};
+use futures_timer::Delay;
+use libp2p_core::upgrade::ReadyUpgrade;
+use libp2p_swarm::{
+    handler::{ConnectionEvent, DialUpgradeError, FullyNegotiatedInbound, FullyNegotiatedOutbound},
+    ConnectionHandler, ConnectionHandlerEvent, Stream, StreamProtocol, StreamUpgradeError,
+    SubstreamProtocol,
+};
+
+use crate::{protocol, PROTOCOL_NAME};
 
 /// The configuration for outbound pings.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// The timeout of an outbound ping.
     timeout: Duration,
-    /// The duration between the last successful outbound or inbound ping
-    /// and the next outbound ping.
+    /// The duration between outbound pings.
     interval: Duration,
-    /// The maximum number of failed outbound pings before the associated
-    /// connection is deemed unhealthy, indicating to the `Swarm` that it
-    /// should be closed.
-    max_failures: NonZeroU32,
-    /// Whether the connection should generally be kept alive unless
-    /// `max_failures` occur.
-    keep_alive: bool,
 }
 
 impl Config {
@@ -63,25 +55,15 @@ impl Config {
     ///
     ///   * [`Config::with_interval`] 15s
     ///   * [`Config::with_timeout`] 20s
-    ///   * [`Config::with_max_failures`] 1
-    ///   * [`Config::with_keep_alive`] false
     ///
     /// These settings have the following effect:
     ///
     ///   * A ping is sent every 15 seconds on a healthy connection.
-    ///   * Every ping sent must yield a response within 20 seconds in order to
-    ///     be successful.
-    ///   * A single ping failure is sufficient for the connection to be subject
-    ///     to being closed.
-    ///   * The connection may be closed at any time as far as the ping protocol
-    ///     is concerned, i.e. the ping protocol itself does not keep the
-    ///     connection alive.
+    ///   * Every ping sent must yield a response within 20 seconds in order to be successful.
     pub fn new() -> Self {
         Self {
             timeout: Duration::from_secs(20),
             interval: Duration::from_secs(15),
-            max_failures: NonZeroU32::new(1).expect("1 != 0"),
-            keep_alive: false,
         }
     }
 
@@ -96,49 +78,12 @@ impl Config {
         self.interval = d;
         self
     }
-
-    /// Sets the maximum number of consecutive ping failures upon which the remote
-    /// peer is considered unreachable and the connection closed.
-    pub fn with_max_failures(mut self, n: NonZeroU32) -> Self {
-        self.max_failures = n;
-        self
-    }
-
-    /// Sets whether the ping protocol itself should keep the connection alive,
-    /// apart from the maximum allowed failures.
-    ///
-    /// By default, the ping protocol itself allows the connection to be closed
-    /// at any time, i.e. in the absence of ping failures the connection lifetime
-    /// is determined by other protocol handlers.
-    ///
-    /// If the maximum number of allowed ping failures is reached, the
-    /// connection is always terminated as a result of [`ConnectionHandler::poll`]
-    /// returning an error, regardless of the keep-alive setting.
-    #[deprecated(
-        since = "0.40.0",
-        note = "Use `libp2p::swarm::behaviour::KeepAlive` if you need to keep connections alive unconditionally."
-    )]
-    pub fn with_keep_alive(mut self, b: bool) -> Self {
-        self.keep_alive = b;
-        self
-    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// The successful result of processing an inbound or outbound ping.
-#[derive(Debug)]
-pub enum Success {
-    /// Received a ping and sent back a pong.
-    Pong,
-    /// Sent a ping and received back a pong.
-    ///
-    /// Includes the round-trip time.
-    Ping { rtt: Duration },
 }
 
 /// An outbound ping failure.
@@ -151,8 +96,14 @@ pub enum Failure {
     Unsupported,
     /// The ping failed for reasons other than a timeout.
     Other {
-        error: Box<dyn std::error::Error + Send + 'static>,
+        error: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
+}
+
+impl Failure {
+    fn other(e: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Other { error: Box::new(e) }
+    }
 }
 
 impl fmt::Display for Failure {
@@ -177,14 +128,11 @@ impl Error for Failure {
 
 /// Protocol handler that handles pinging the remote at a regular period
 /// and answering ping queries.
-///
-/// If the remote doesn't respond, produces an error that closes the connection.
 pub struct Handler {
     /// Configuration options.
     config: Config,
-    /// The timer used for the delay to the next ping as well as
-    /// the ping timeout.
-    timer: Delay,
+    /// The timer used for the delay to the next ping.
+    interval: Delay,
     /// Outbound ping failures that are pending to be processed by `poll()`.
     pending_errors: VecDeque<Failure>,
     /// The number of consecutive ping failures that occurred.
@@ -219,7 +167,7 @@ impl Handler {
     pub fn new(config: Config) -> Self {
         Handler {
             config,
-            timer: Delay::new(Duration::new(0, 0)),
+            interval: Delay::new(Duration::new(0, 0)),
             pending_errors: VecDeque::with_capacity(2),
             failures: 0,
             outbound: None,
@@ -231,22 +179,42 @@ impl Handler {
     fn on_dial_upgrade_error(
         &mut self,
         DialUpgradeError { error, .. }: DialUpgradeError<
-            <Self as ConnectionHandler>::OutboundOpenInfo,
+            (),
             <Self as ConnectionHandler>::OutboundProtocol,
         >,
     ) {
         self.outbound = None; // Request a new substream on the next `poll`.
 
+        // Timer is already polled and expired before substream request is initiated
+        // and will be polled again later on in our `poll` because we reset `self.outbound`.
+        //
+        // `futures-timer` allows an expired timer to be polled again and returns
+        // immediately `Poll::Ready`. However in its WASM implementation there is
+        // a bug that causes the expired timer to panic.
+        // This is a workaround until a proper fix is merged and released.
+        // See libp2p/rust-libp2p#5447 for more info.
+        //
+        // TODO: remove when async-rs/futures-timer#74 gets merged.
+        self.interval.reset(Duration::new(0, 0));
+
         let error = match error {
-            ConnectionHandlerUpgrErr::Upgrade(UpgradeError::Select(NegotiationError::Failed)) => {
+            StreamUpgradeError::NegotiationFailed => {
                 debug_assert_eq!(self.state, State::Active);
 
                 self.state = State::Inactive { reported: false };
                 return;
             }
             // Note: This timeout only covers protocol negotiation.
-            ConnectionHandlerUpgrErr::Timeout => Failure::Timeout,
-            e => Failure::Other { error: Box::new(e) },
+            StreamUpgradeError::Timeout => Failure::Other {
+                error: Box::new(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "ping protocol negotiation timed out",
+                )),
+            },
+            // TODO: remove when Rust 1.82 is MSRV
+            #[allow(unreachable_patterns)]
+            StreamUpgradeError::Apply(e) => libp2p_core::util::unreachable(e),
+            StreamUpgradeError::Io(e) => Failure::Other { error: Box::new(e) },
         };
 
         self.pending_errors.push_front(error);
@@ -254,32 +222,24 @@ impl Handler {
 }
 
 impl ConnectionHandler for Handler {
-    type InEvent = Void;
-    type OutEvent = crate::Result;
-    type Error = Failure;
-    type InboundProtocol = ReadyUpgrade<&'static [u8]>;
-    type OutboundProtocol = ReadyUpgrade<&'static [u8]>;
+    type FromBehaviour = Infallible;
+    type ToBehaviour = Result<Duration, Failure>;
+    type InboundProtocol = ReadyUpgrade<StreamProtocol>;
+    type OutboundProtocol = ReadyUpgrade<StreamProtocol>;
     type OutboundOpenInfo = ();
     type InboundOpenInfo = ();
 
-    fn listen_protocol(&self) -> SubstreamProtocol<ReadyUpgrade<&'static [u8]>, ()> {
+    fn listen_protocol(&self) -> SubstreamProtocol<ReadyUpgrade<StreamProtocol>> {
         SubstreamProtocol::new(ReadyUpgrade::new(PROTOCOL_NAME), ())
     }
 
-    fn on_behaviour_event(&mut self, _: Void) {}
+    fn on_behaviour_event(&mut self, _: Infallible) {}
 
-    fn connection_keep_alive(&self) -> KeepAlive {
-        if self.config.keep_alive {
-            KeepAlive::Yes
-        } else {
-            KeepAlive::No
-        }
-    }
-
+    #[tracing::instrument(level = "trace", name = "ConnectionHandler::poll", skip(self, cx))]
     fn poll(
         &mut self,
         cx: &mut Context<'_>,
-    ) -> Poll<ConnectionHandlerEvent<ReadyUpgrade<&'static [u8]>, (), crate::Result, Self::Error>>
+    ) -> Poll<ConnectionHandlerEvent<ReadyUpgrade<StreamProtocol>, (), Result<Duration, Failure>>>
     {
         match self.state {
             State::Inactive { reported: true } => {
@@ -287,7 +247,9 @@ impl ConnectionHandler for Handler {
             }
             State::Inactive { reported: false } => {
                 self.state = State::Inactive { reported: true };
-                return Poll::Ready(ConnectionHandlerEvent::Custom(Err(Failure::Unsupported)));
+                return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(Err(
+                    Failure::Unsupported,
+                )));
             }
             State::Active => {}
         }
@@ -297,13 +259,14 @@ impl ConnectionHandler for Handler {
             match fut.poll_unpin(cx) {
                 Poll::Pending => {}
                 Poll::Ready(Err(e)) => {
-                    log::debug!("Inbound ping error: {:?}", e);
+                    tracing::debug!("Inbound ping error: {:?}", e);
                     self.inbound = None;
                 }
                 Poll::Ready(Ok(stream)) => {
+                    tracing::trace!("answered inbound ping from peer");
+
                     // A ping from a remote peer has been answered, wait for the next.
                     self.inbound = Some(protocol::recv_ping(stream).boxed());
-                    return Poll::Ready(ConnectionHandlerEvent::Custom(Ok(Success::Pong)));
                 }
             }
         }
@@ -311,24 +274,17 @@ impl ConnectionHandler for Handler {
         loop {
             // Check for outbound ping failures.
             if let Some(error) = self.pending_errors.pop_back() {
-                log::debug!("Ping failure: {:?}", error);
+                tracing::debug!("Ping failure: {:?}", error);
 
                 self.failures += 1;
 
-                // Note: For backward-compatibility, with configured
-                // `max_failures == 1`, the first failure is always "free"
-                // and silent. This allows peers who still use a new substream
+                // Note: For backward-compatibility the first failure is always "free"
+                // and silent. This allows peers who use a new substream
                 // for each ping to have successful ping exchanges with peers
                 // that use a single substream, since every successful ping
-                // resets `failures` to `0`, while at the same time emitting
-                // events only for `max_failures - 1` failures, as before.
-                if self.failures > 1 || self.config.max_failures.get() > 1 {
-                    if self.failures >= self.config.max_failures.get() {
-                        log::debug!("Too many failures ({}). Closing connection.", self.failures);
-                        return Poll::Ready(ConnectionHandlerEvent::Close(error));
-                    }
-
-                    return Poll::Ready(ConnectionHandlerEvent::Custom(Err(error)));
+                // resets `failures` to `0`.
+                if self.failures > 1 {
+                    return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(Err(error)));
                 }
             }
 
@@ -336,49 +292,46 @@ impl ConnectionHandler for Handler {
             match self.outbound.take() {
                 Some(OutboundState::Ping(mut ping)) => match ping.poll_unpin(cx) {
                     Poll::Pending => {
-                        if self.timer.poll_unpin(cx).is_ready() {
-                            self.pending_errors.push_front(Failure::Timeout);
-                        } else {
-                            self.outbound = Some(OutboundState::Ping(ping));
-                            break;
-                        }
+                        self.outbound = Some(OutboundState::Ping(ping));
+                        break;
                     }
                     Poll::Ready(Ok((stream, rtt))) => {
+                        tracing::debug!(?rtt, "ping succeeded");
                         self.failures = 0;
-                        self.timer.reset(self.config.interval);
+                        self.interval.reset(self.config.interval);
                         self.outbound = Some(OutboundState::Idle(stream));
-                        return Poll::Ready(ConnectionHandlerEvent::Custom(Ok(Success::Ping {
-                            rtt,
-                        })));
+                        return Poll::Ready(ConnectionHandlerEvent::NotifyBehaviour(Ok(rtt)));
                     }
                     Poll::Ready(Err(e)) => {
-                        self.pending_errors
-                            .push_front(Failure::Other { error: Box::new(e) });
+                        self.interval.reset(self.config.interval);
+                        self.pending_errors.push_front(e);
                     }
                 },
-                Some(OutboundState::Idle(stream)) => match self.timer.poll_unpin(cx) {
+                Some(OutboundState::Idle(stream)) => match self.interval.poll_unpin(cx) {
                     Poll::Pending => {
                         self.outbound = Some(OutboundState::Idle(stream));
                         break;
                     }
                     Poll::Ready(()) => {
-                        self.timer.reset(self.config.timeout);
-                        self.outbound =
-                            Some(OutboundState::Ping(protocol::send_ping(stream).boxed()));
+                        self.outbound = Some(OutboundState::Ping(
+                            send_ping(stream, self.config.timeout).boxed(),
+                        ));
                     }
                 },
                 Some(OutboundState::OpenStream) => {
                     self.outbound = Some(OutboundState::OpenStream);
                     break;
                 }
-                None => {
-                    self.outbound = Some(OutboundState::OpenStream);
-                    let protocol = SubstreamProtocol::new(ReadyUpgrade::new(PROTOCOL_NAME), ())
-                        .with_timeout(self.config.timeout);
-                    return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
-                        protocol,
-                    });
-                }
+                None => match self.interval.poll_unpin(cx) {
+                    Poll::Pending => break,
+                    Poll::Ready(()) => {
+                        self.outbound = Some(OutboundState::OpenStream);
+                        let protocol = SubstreamProtocol::new(ReadyUpgrade::new(PROTOCOL_NAME), ());
+                        return Poll::Ready(ConnectionHandlerEvent::OutboundSubstreamRequest {
+                            protocol,
+                        });
+                    }
+                },
             }
         }
 
@@ -387,44 +340,54 @@ impl ConnectionHandler for Handler {
 
     fn on_connection_event(
         &mut self,
-        event: ConnectionEvent<
-            Self::InboundProtocol,
-            Self::OutboundProtocol,
-            Self::InboundOpenInfo,
-            Self::OutboundOpenInfo,
-        >,
+        event: ConnectionEvent<Self::InboundProtocol, Self::OutboundProtocol>,
     ) {
         match event {
             ConnectionEvent::FullyNegotiatedInbound(FullyNegotiatedInbound {
-                protocol: stream,
+                protocol: mut stream,
                 ..
             }) => {
+                stream.ignore_for_keep_alive();
                 self.inbound = Some(protocol::recv_ping(stream).boxed());
             }
             ConnectionEvent::FullyNegotiatedOutbound(FullyNegotiatedOutbound {
-                protocol: stream,
+                protocol: mut stream,
                 ..
             }) => {
-                self.timer.reset(self.config.timeout);
-                self.outbound = Some(OutboundState::Ping(protocol::send_ping(stream).boxed()));
+                stream.ignore_for_keep_alive();
+                self.outbound = Some(OutboundState::Ping(
+                    send_ping(stream, self.config.timeout).boxed(),
+                ));
             }
             ConnectionEvent::DialUpgradeError(dial_upgrade_error) => {
                 self.on_dial_upgrade_error(dial_upgrade_error)
             }
-            ConnectionEvent::AddressChange(_) | ConnectionEvent::ListenUpgradeError(_) => {}
+            _ => {}
         }
     }
 }
 
-type PingFuture = BoxFuture<'static, Result<(NegotiatedSubstream, Duration), io::Error>>;
-type PongFuture = BoxFuture<'static, Result<NegotiatedSubstream, io::Error>>;
+type PingFuture = BoxFuture<'static, Result<(Stream, Duration), Failure>>;
+type PongFuture = BoxFuture<'static, Result<Stream, io::Error>>;
 
 /// The current state w.r.t. outbound pings.
 enum OutboundState {
     /// A new substream is being negotiated for the ping protocol.
     OpenStream,
     /// The substream is idle, waiting to send the next ping.
-    Idle(NegotiatedSubstream),
+    Idle(Stream),
     /// A ping is being sent and the response awaited.
     Ping(PingFuture),
+}
+
+/// A wrapper around [`protocol::send_ping`] that enforces a time out.
+async fn send_ping(stream: Stream, timeout: Duration) -> Result<(Stream, Duration), Failure> {
+    let ping = protocol::send_ping(stream);
+    futures::pin_mut!(ping);
+
+    match future::select(ping, Delay::new(timeout)).await {
+        Either::Left((Ok((stream, rtt)), _)) => Ok((stream, rtt)),
+        Either::Left((Err(e), _)) => Err(Failure::other(e)),
+        Either::Right(((), _)) => Err(Failure::Timeout),
+    }
 }

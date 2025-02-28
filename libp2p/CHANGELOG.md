@@ -1,51 +1,218 @@
-# Individual crates
+## 0.55.1
+- Introduce `libp2p-webrtc-websys` behind `webrtc-websys` feature flag.
+  See [PR 5819](https://github.com/libp2p/rust-libp2p/pull/5819).
 
-## Main APIs
+- Make the `*-websys` variants (`libp2p-webrtc-websys`, `libp2p-websocket-websys`, `libp2p-webtransport-websys`) only available on wasm32 target architecture.
+  See [PR 5891](https://github.com/libp2p/rust-libp2p/pull/5891).
+  
+## 0.55.0
 
-- [`libp2p-core` CHANGELOG](core/CHANGELOG.md)
-- [`libp2p-swarm` CHANGELOG](swarm/CHANGELOG.md)
-- [`libp2p-swarm-derive` CHANGELOG](swarm-derive/CHANGELOG.md)
+- Raise MSRV to 1.83.0.
+  See [PR 5650](https://github.com/libp2p/rust-libp2p/pull/5650).
 
-## Application Protocols
+- Add `with_connection_timeout` on `SwarmBuilder` to allow configuration of the connection_timeout parameter.
+  See [PR 5575](https://github.com/libp2p/rust-libp2p/pull/5575).
 
-- [`libp2p-floodsub` CHANGELOG](protocols/floodsub/CHANGELOG.md)
-- [`libp2p-gossipsub` CHANGELOG](protocols/gossipsub/CHANGELOG.md)
-- [`libp2p-identify` CHANGELOG](protocols/identify/CHANGELOG.md)
-- [`libp2p-kad` CHANGELOG](protocols/kad/CHANGELOG.md)
-- [`libp2p-mdns` CHANGELOG](protocols/mdns/CHANGELOG.md)
-- [`libp2p-ping` CHANGELOG](protocols/ping/CHANGELOG.md)
-- [`libp2p-relay` CHANGELOG](protocols/relay/CHANGELOG.md)
-- [`libp2p-request-response` CHANGELOG](protocols/request-response/CHANGELOG.md)
-- [`libp2p-rendezvous` CHANGELOG](protocols/rendezvous/CHANGELOG.md)
+- Deprecate `void` crate.
+  See [PR 5676](https://github.com/libp2p/rust-libp2p/pull/5676).
 
-## Transport Protocols & Upgrades
+- Update default for idle-connection-timeout to 10s.
+  See [PR 4967](https://github.com/libp2p/rust-libp2p/pull/4967).
 
-- [`libp2p-deflate` CHANGELOG](transports/deflate/CHANGELOG.md)
-- [`libp2p-dns` CHANGELOG](transports/dns/CHANGELOG.md)
-- [`libp2p-noise` CHANGELOG](transports/noise/CHANGELOG.md)
-- [`libp2p-plaintext` CHANGELOG](transports/plaintext/CHANGELOG.md)
-- [`libp2p-pnet` CHANGELOG](transports/pnet/CHANGELOG.md)
-- [`libp2p-quic` CHANGELOG](transports/quic/CHANGELOG.md)
-- [`libp2p-tcp` CHANGELOG](transports/tcp/CHANGELOG.md)
-- [`libp2p-uds` CHANGELOG](transports/uds/CHANGELOG.md)
-- [`libp2p-wasm-ext` CHANGELOG](transports/wasm-ext/CHANGELOG.md)
-- [`libp2p-websocket` CHANGELOG](transports/websocket/CHANGELOG.md)
-- [`libp2p-tls` CHANGELOG](transports/tls/CHANGELOG.md)
+- Expose swarm builder phase errors.
+  See [PR 5726](https://github.com/libp2p/rust-libp2p/pull/5726).
 
-## Multiplexers
+- Deprecate `ConnectionHandler::{InboundOpenInfo, OutboundOpenInfo}` associated type.  
+  Previously, users could tag pending sub streams with custom data and retrieve the data 
+  after the substream has been negotiated.
+  But substreams themselves are completely interchangeable, users should instead track 
+  additional data inside `ConnectionHandler` after negotiation.   
+  See [PR 5242](https://github.com/libp2p/rust-libp2p/pull/5242).
 
-- [`libp2p-mplex` CHANGELOG](muxers/mplex/CHANGELOG.md)
-- [`libp2p-yamux` CHANGELOG](muxers/yamux/CHANGELOG.md)
+<!-- Update to libp2p-core v0.43.0 -->
 
-## Utilities
+## 0.54.1
 
-- [`libp2p-metrics` CHANGELOG](misc/metrics/CHANGELOG.md)
-- [`multistream-select` CHANGELOG](misc/multistream-select/CHANGELOG.md)
-- [`rw-stream-sink` CHANGELOG](misc/rw-stream-sink/CHANGELOG.md)
+- Update individual crates.
+    - Update to [`libp2p-metrics` `0.15.0`](misc/metrics/CHANGELOG.md#0150).
 
-# `libp2p` facade crate
+## 0.54.0
 
-# 0.51.0
+- Update individual crates.
+    - Update to [`libp2p-kad` `v0.46.0`](protocols/kad/CHANGELOG.md#0460).
+    - Update to [`libp2p-identify` `v0.45.0`](protocols/identify/CHANGELOG.md#0450).
+
+- Raise MSRV to 1.73.
+  See [PR 5266](https://github.com/libp2p/rust-libp2p/pull/5266).
+
+- Implement refactored `Transport`.
+  See [PR 4568].
+
+- Move `address_translation` from `libp2p-core` to `libp2p-swarm` and `libp2p-identify`. To now get
+  address translation behaviour, i.e. discovery of extern address (candidates) based on connecting
+  to other peers, one needs to use `libp2p-identify` now. This pertains to you if your nodes can be
+  behind NATs and they aren't aware of their true external address.
+  See [PR 4568].
+
+- Use `web-time` instead of `instant`.
+  See [PR 5347](https://github.com/libp2p/rust-libp2p/pull/5347).
+
+- Remove redundant async signature from builder methods.
+  See [PR 5468](https://github.com/libp2p/rust-libp2p/pull/5468).
+
+[PR 4568]: https://github.com/libp2p/rust-libp2p/pull/4568
+
+## 0.53.2
+
+- Allow `SwarmBuilder::with_bandwidth_metrics` after `SwarmBuilder::with_websocket`.
+  See [PR 4937](https://github.com/libp2p/rust-libp2p/pull/4937).
+
+## 0.53.1
+
+- Allow `SwarmBuilder::with_quic_config` to be called without `with_tcp` first.
+  See [PR 4821](https://github.com/libp2p/rust-libp2p/pull/4821).
+- Introduce `SwarmBuilder::with_dns_config`.
+  See [PR 4808](https://github.com/libp2p/rust-libp2p/pull/4808).
+
+## 0.53.0
+
+- Raise MSRV to 1.73.
+  See [PR 4692](https://github.com/libp2p/rust-libp2p/pull/4692).
+- Remove deprecated `libp2p-wasm-ext`.
+  Users should use `libp2p-websocket-websys` instead.
+  See [PR 4694](https://github.com/libp2p/rust-libp2p/pull/4694).
+- Remove deprecated `libp2p-deflate`.
+  See [issue 4522](https://github.com/libp2p/rust-libp2p/issues/4522) for details.
+  See [PR 4729](https://github.com/libp2p/rust-libp2p/pull/4729).
+- Remove deprecated `development_transport`.
+  Use `libp2p::SwarmBuilder` instead.
+  See [PR 4732](https://github.com/libp2p/rust-libp2p/pull/4732).
+- Introduce `SwarmBuilder::with_bandwidth_metrics` exposing Prometheus bandwidth metrics per transport protocol stack and direction (in-/ outbound).
+  Deprecate `Transport::with_bandwidth_logging` and `SwarmBuilder::with_bandwidth_logging` in favor of the new `SwarmBuilder::with_bandwidth_metrics`.
+  See [PR 4727](https://github.com/libp2p/rust-libp2p/pull/4727).
+
+## 0.52.4
+
+- Introduce `libp2p::websocket_websys` module behind `websocket-websys` feature flag.
+  This supersedes the existing `libp2p::wasm_ext` module which is now deprecated.
+  See [PR 3679].
+
+- Introduce a new `libp2p::SwarmBuilder` in favor of the now deprecated `libp2p::swarm::SwarmBuilder`.
+  See `libp2p::SwarmBuilder` docs on how to use the new builder.
+  Also see [PR 4120].
+
+- Update `libp2p-identity` version to 0.2.6.
+  Under the hood, we feature-flagged `libp2p-identity`'s `rand` dependency but it is enabled by default when using `libp2p`.
+  See [PR 4349].
+
+[PR 3679]: https://github.com/libp2p/rust-libp2p/pull/3679
+[PR 4120]: https://github.com/libp2p/rust-libp2p/pull/4120
+[PR 4349]: https://github.com/libp2p/rust-libp2p/pull/4349
+
+## 0.52.3
+
+- Add `libp2p-quic` stable release.
+
+## 0.52.2
+
+- Include gossipsub when compiling for wasm.
+  See [PR 4217].
+
+- Add `json` feature which exposes `request_response::json`.
+  See [PR 4188].
+
+- Add support for UPnP via the IGD protocol.
+  See [PR 4156].
+
+- Add `libp2p-memory-connection-limits` providing memory usage based connection limit configurations.
+  See [PR 4281].
+
+[PR 4188]: https://github.com/libp2p/rust-libp2p/pull/4188
+[PR 4156]: https://github.com/libp2p/rust-libp2p/pull/4156
+[PR 4217]: https://github.com/libp2p/rust-libp2p/pull/4217
+[PR 4281]: https://github.com/libp2p/rust-libp2p/pull/4281
+
+## 0.52.1
+
+- Add `libp2p-webtransport-websys` providing WebTransport for WASM environments.
+  See [PR 4015].
+
+[PR 4015]: https://github.com/libp2p/rust-libp2p/pull/4015
+
+## 0.52.0
+
+- Raise MSRV to 1.65.
+  See [PR 3715].
+
+- Protocol names are now required to be valid UTF8 strings.
+  We delete the `ProtocolName` trait from `libp2p::core` and replace it with a requirement for `AsRef<str>`.
+  At the same time, we introduce `StreamProtocol`, a newtype in `libp2p::swarm`.
+  This newtype enforces additional variants like a leading forward-slash.
+  We encourage users to use `StreamProtocol` when implementing `UpgradeInfo`.
+  See [PR 3746].
+
+- Rename `NetworkBehaviour::OutEvent` to `NetworkBehaviour::ToSwarm`, `ConnectionHandler::InEvent` to `ConnectionHandler::FromBehaviour`, `ConnectionHandler::OutEvent` to `ConnectionHandler::ToBehaviour`. See [PR 3848].
+
+- Remove deprecated `mplex` module.
+  You can still depend on `libp2p-mplex` directly but we strongly encourage to migrate to `yamux`.
+  This also removes `mplex` from the `development_transport` and `tokio_development_transport` functions.
+  See [PR 3920].
+
+- Remove `libp2p-perf` protocol. To use `libp2p-perf` one needs to import it directly.
+  See [PR 3990].
+
+- Remove `libp2p-quic` and `libp2p-webrtc` protocols.
+  These are in alpha status and should be depended on directly.
+  See [PR 4041].
+
+[PR 3715]: https://github.com/libp2p/rust-libp2p/pull/3715
+[PR 3746]: https://github.com/libp2p/rust-libp2p/pull/3746
+[PR 3848]: https://github.com/libp2p/rust-libp2p/pull/3848
+[PR 3920]: https://github.com/libp2p/rust-libp2p/pull/3920
+[PR 3990]: https://github.com/libp2p/rust-libp2p/pull/3990
+[PR 4041]: https://github.com/libp2p/rust-libp2p/pull/4041
+
+## 0.51.3
+
+- Deprecate the `mplex` feature.
+  The recommended baseline stream multiplexer is `yamux`.
+  See [PR 3689].
+
+[PR 3689]: https://github.com/libp2p/rust-libp2p/pull/3689
+
+## 0.51.2
+
+- Introduce `libp2p::connection_limits` module.
+  See [PR 3386].
+
+- Deprecate the `quic` and `webrtc` feature.
+  These two crates are only in alpha state.
+  To properly communicate this to users, we want them to add the dependency directly which makes the `alpha` version visible.
+  See [PR 3580].
+
+- Introduce `libp2p::allow_block_list` module and deprecate `libp2p::Swarm::ban_peer_id`.
+  See [PR 3590].
+
+- Introduce `libp2p::perf` module.
+  See [PR 3693].
+
+[PR 3386]: https://github.com/libp2p/rust-libp2p/pull/3386
+[PR 3580]: https://github.com/libp2p/rust-libp2p/pull/3580
+[PR 3590]: https://github.com/libp2p/rust-libp2p/pull/3590
+[PR 3693]: https://github.com/libp2p/rust-libp2p/pull/3693
+
+## 0.51.1
+
+- Depend on `libp2p-tls` `v0.1.0`.
+
+- Introduce `ed25519` feature.
+  For backwards-compatibility, the `ed25519` identity keys are still available without activating this feature.
+  However, going forward, you should explicitly activate it to avoid compile errors going forward.
+  See [PR 3350].
+
+[PR 3350]: https://github.com/libp2p/rust-libp2p/pull/3350
+
+## 0.51.0
 
 - Enable `NetworkBehaviour`s to manage connections.
   This deprecates `NetworkBehaviour::new_handler` and `NetworkBehaviour::addresses_of_peer`.
@@ -101,7 +268,7 @@
 
 [PR 3191]: https://github.com/libp2p/rust-libp2p/pull/3191
 
-# 0.50.0
+## 0.50.0
 
 This is a large release. After > 4 years, rust-libp2p ships with an [(alpha) QUIC
 implementation](transports/quic/CHANGELOG.md#070-alpha). The [necessary TLS logic is extracted into
@@ -151,7 +318,7 @@ definitely not it. See below for the many other changes packed into this release
 [PR 2289]: https://github.com/libp2p/rust-libp2p/pull/2289
 [PR 3055]: https://github.com/libp2p/rust-libp2p/pull/3055
 
-# 0.49.0
+## 0.49.0
 
 - Remove default features. You need to enable required features explicitly now. As a quick workaround, you may want to use the
   new `full` feature which activates all features. See [PR 2918].
@@ -196,7 +363,7 @@ definitely not it. See below for the many other changes packed into this release
 [PR 2918]: https://github.com/libp2p/rust-libp2p/pull/2918
 [PR 2962]: https://github.com/libp2p/rust-libp2p/pull/2962
 
-# 0.48.0
+## 0.48.0
 
 - Update to [`libp2p-core` `v0.36.0`](core/CHANGELOG.md#0360).
 
@@ -222,7 +389,7 @@ definitely not it. See below for the many other changes packed into this release
 
 - Update to [`libp2p-request-response` `v0.21.0`](protocols/request-response/CHANGELOG.md#0210).
 
-# 0.47.0
+## 0.47.0
 
 - Update to [`libp2p-dcutr` `v0.5.0`](protocols/dcutr/CHANGELOG.md#050).
 
@@ -248,11 +415,11 @@ definitely not it. See below for the many other changes packed into this release
 
 - Update to [`libp2p-swarm` `v0.38.0`](swarm/CHANGELOG.md#0380).
 
-# 0.46.1
+## 0.46.1
 
 - Update to `libp2p-derive` [`v0.28.0`](swarm-derive/CHANGELOG.md#0280).
 
-# 0.46.0
+## 0.46.0
 
 - Semver bump Rust from `1.56.1` to `1.60.0` . See [PR 2646].
 - Added weak dependencies for features. See [PR 2646].
@@ -278,7 +445,7 @@ definitely not it. See below for the many other changes packed into this release
 
 [PR 2646]: https://github.com/libp2p/rust-libp2p/pull/2646
 
-# 0.45.1
+## 0.45.1
 
 - Update individual crates.
     - Update to [`libp2p-dcutr` `v0.3.1`](protocols/dcutr/CHANGELOG.md).
@@ -287,7 +454,7 @@ definitely not it. See below for the many other changes packed into this release
     - Update to [`libp2p-relay` `v0.9.1`](protocols/relay/CHANGELOG.md).
     - Update to [`libp2p-swarm` `v0.36.1`](swarm/CHANGELOG.md).
 
-# 0.45.0
+## 0.45.0
 - Update individual crates.
     - Update to [`libp2p-plaintext` `v0.33.0`](transports/plaintext/CHANGELOG.md).
     - Update to [`libp2p-noise` `v0.36.0`](transports/noise/CHANGELOG.md).
@@ -1082,7 +1249,7 @@ must not be skipped!
 - Merged `PeriodicPing` and `PingListen` into one `Ping` behaviour.
 - `Floodsub` now generates `FloodsubEvent`s instead of direct floodsub messages.
 - Added `ProtocolsHandler::connection_keep_alive`. If all the handlers return `false`, then the connection to the remote node will automatically be gracefully closed after a few seconds.
-- The crate now successfuly compiles for the `wasm32-unknown-unknown` target.
+- The crate now successfully compiles for the `wasm32-unknown-unknown` target.
 - Updated `ring` to version 0.13.
 - Updated `secp256k1` to version 0.12.
 - The enum returned by `RawSwarm::peer()` can now return `LocalNode`. This makes it impossible to accidentally attempt to dial the local node.

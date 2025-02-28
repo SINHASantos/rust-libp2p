@@ -18,19 +18,19 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
+use std::{fmt, pin::Pin};
+
 use futures::{
     io::{self, AsyncWrite},
     ready,
     task::{Context, Poll},
 };
-use log::trace;
 use pin_project::pin_project;
 use salsa20::{cipher::StreamCipher, XSalsa20};
-use std::{fmt, pin::Pin};
 
 /// A writer that encrypts and forwards to an inner writer
 #[pin_project]
-pub struct CryptWriter<W> {
+pub(crate) struct CryptWriter<W> {
     #[pin]
     inner: W,
     buf: Vec<u8>,
@@ -39,7 +39,7 @@ pub struct CryptWriter<W> {
 
 impl<W: AsyncWrite> CryptWriter<W> {
     /// Creates a new `CryptWriter` with the specified buffer capacity.
-    pub fn with_capacity(capacity: usize, inner: W, cipher: XSalsa20) -> CryptWriter<W> {
+    pub(crate) fn with_capacity(capacity: usize, inner: W, cipher: XSalsa20) -> CryptWriter<W> {
         CryptWriter {
             inner,
             buf: Vec::with_capacity(capacity),
@@ -50,7 +50,7 @@ impl<W: AsyncWrite> CryptWriter<W> {
     /// Gets a pinned mutable reference to the inner writer.
     ///
     /// It is inadvisable to directly write to the inner writer.
-    pub fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut W> {
+    pub(crate) fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut W> {
         self.project().inner
     }
 }
@@ -75,7 +75,8 @@ fn poll_flush_buf<W: AsyncWrite>(
                     // we made progress, so try again
                     written += n;
                 } else {
-                    // we got Ok but got no progress whatsoever, so bail out so we don't spin writing 0 bytes.
+                    // we got Ok but got no progress whatsoever,
+                    // so bail out so we don't spin writing 0 bytes.
                     ret = Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::WriteZero,
                         "Failed to write buffered data",
@@ -120,7 +121,7 @@ impl<W: AsyncWrite> AsyncWrite for CryptWriter<W> {
         let res = Pin::new(&mut *this.buf).poll_write(cx, buf);
         if let Poll::Ready(Ok(count)) = res {
             this.cipher.apply_keystream(&mut this.buf[0..count]);
-            trace!("encrypted {} bytes", count);
+            tracing::trace!(bytes=%count, "encrypted bytes");
         } else {
             debug_assert!(false);
         };

@@ -22,7 +22,7 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
-use libp2p_core::PeerId;
+use libp2p_identity::PeerId;
 
 pub mod protocol;
 
@@ -30,17 +30,25 @@ mod layer;
 mod topic;
 
 mod proto {
+    #![allow(unreachable_pub)]
     include!("generated/mod.rs");
-    pub use self::floodsub::pb::{mod_RPC::SubOpts, Message, RPC};
+    pub(crate) use self::floodsub::pb::{mod_RPC::SubOpts, Message, RPC};
 }
 
+#[allow(deprecated)]
 pub use self::layer::{Floodsub, FloodsubEvent};
-pub use self::protocol::{FloodsubMessage, FloodsubRpc};
-pub use self::topic::Topic;
+pub use self::{
+    layer::{Behaviour, Event},
+    protocol::{FloodsubMessage, FloodsubRpc},
+    topic::Topic,
+};
+
+#[deprecated = "Use `Config` instead."]
+pub type FloodsubConfig = Config;
 
 /// Configuration options for the Floodsub protocol.
 #[derive(Debug, Clone)]
-pub struct FloodsubConfig {
+pub struct Config {
     /// Peer id of the local node. Used for the source of the messages that we publish.
     pub local_peer_id: PeerId,
 
@@ -49,7 +57,7 @@ pub struct FloodsubConfig {
     pub subscribe_local_messages: bool,
 }
 
-impl FloodsubConfig {
+impl Config {
     pub fn new(local_peer_id: PeerId) -> Self {
         Self {
             local_peer_id,
